@@ -76,6 +76,7 @@ options) and restart Home Assistant:
 | `alarm_media` | Media content id that is played (default `alarm.wav`). |
 | `alarm_media_type` | Media content type (default `music`). |
 | `alarm_ring_seconds` | Upper bound for one ringing period in seconds (default 120). |
+| `alarm_tick_seconds` | Automatic scheduler interval in seconds (default 20, minimum 1). |
 
 A denied or unknown device is rejected before any service call is made. Nothing is granted
 automatically.
@@ -95,7 +96,7 @@ All services live under the `nabu_core` domain and answer with a mapping
 | `nabu_core.alarm_status` | alarms, free slots, missed occurrences, schedule errors |
 | `nabu_core.alarm_stop` | request a stop; returns `STOP_REQUESTED` and whether the device confirmed it |
 | `nabu_core.alarm_configure_catch_up` | set the catch-up window or switch catching up off |
-| `nabu_core.alarm_ring` | run one scheduler tick (used by tests and by an external time source) |
+| `nabu_core.alarm_ring` | run one scheduler tick manually (also used by tests) |
 
 Nabu Core is the only writable alarm truth. Do not mirror alarms into Home Assistant helpers;
 the integration never reads them.
@@ -106,8 +107,9 @@ the integration never reads them.
   not *audible*.
 - No Echo device, speaker or production Home Assistant was involved. Device ids in the
   examples are placeholders.
-- There is no built-in timer that fires alarms: `nabu_core.alarm_ring` has to be called, for
-  example from an automation every minute. A self-scheduling component is future work.
+- The opt-in alarm layer registers an automatic Home Assistant scheduler tick (20 seconds by
+  default) and unregisters it on unload. The tick was verified in the laboratory; real-device
+  timing and unattended operation have not been validated. No extra automation is required.
 - The media player is the only output channel; there is no fallback and no parallel ringing.
 - Voice handling covers the documented German forms. Everything else deliberately asks back.
 - The web GUI does not exist yet; the services are the interface.
