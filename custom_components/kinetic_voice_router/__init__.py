@@ -1,0 +1,169 @@
+"""Kinetic Voice Router: a Home Assistant conversation agent in front of Hermes Agent.
+
+The integration registers its own conversation agent. Home Assistant resolves local
+intents first (`prefer_local_intents`); only sentences it did not handle reach this
+agent. The agent forwards them to a configured Hermes Agent Companion, optionally
+checked by the router policy (modes off / observe / active). It never calls Home
+Assistant services, never exposes entities and never changes the Assist pipeline.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TypeAlias
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+from .const import (
+    CONF_MODE,
+    CONF_SPEECH_MEMORY,
+    CONF_TOKEN,
+    CONF_URL,
+    CONF_VERIFY_TLS,
+    CONN_AUTH_FAILED,
+    CONN_OK,
+    DEFAULT_SPEECH_MEMORY,
+    DEFAULT_VERIFY_TLS,
+    DOMAIN,
+    INFERENCE_TIMEOUT,
+    REQUEST_TIMEOUT,
+    STATS_KEY,
+)
+from .hermes_client import HermesClient, HermesError
+from .runtime import RouterRuntime
+from .speech_store import SpeechMemoryStore
+from .status import async_probe
+from .voice_router import RouterBridge, RuntimeStats, operating_mode
+
+_LOGGER = logging.getLogger(__name__)
+
+ALARM_REGISTRY_KEY = f"{DOMAIN}_alarm_services"
+
+PLATFORMS: list[Platform] = [Platform.CONVERSATION]
+
+KineticVoiceRouterConfigEntry: TypeAlias = ConfigEntry[RouterRuntime]
+
+
+def runtime_stats(hass: HomeAssistant) -> RuntimeStats:
+    """Process-lifetime counters; kept across entry reloads, reset by a HA restart."""
+    stats = hass.data.get(STATS_KEY)
+    if not isinstance(stats, RuntimeStats):
+        stats = RuntimeStats()
+        hass.data[STATS_KEY] = stats
+    return stats
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: KineticVoiceRouterConfigEntry) -> bool:
+    """Bring entries of every earlier version to 1.3.
+
+    1.1 (0.3.0, boolean router_enabled) -> 1.2 (mode off/observe/active): a previously
+    enabled router stays active, anything else becomes off.
+    1.2 -> 1.3 (standalone): the Hermes connection now lives in the entry itself. An
+    entry without it is not guessed or filled in; setup asks for it via re-authentication.
+    """
+    if entry.version > 1:
+        return False  # downgrade from a future version: refuse instead of guessing
+    if entry.version == 1 and entry.minor_version < 2:
+        mode = operating_mode(entry.options).value
+        hass.config_entries.async_update_entry(entry, options={CONF_MODE: mode}, minor_version=2)
+        _LOGGER.info("Kinetic Voice Router options migrated to mode=%s", mode)
+    if entry.version == 1 and entry.minor_version < 3:
+        hass.config_entries.async_update_entry(entry, minor_version=3)
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: KineticVoiceRouterConfigEntry) -> bool:
+    """Connect to the Hermes Companion and register the conversation agent."""
+    url, token = entry.data.get(CONF_URL), entry.data.get(CONF_TOKEN)
+    if not url or not token:
+        raise ConfigEntryAuthFailed("Hermes Companion connection is not configured")
+    verify_tls = bool(entry.data.get(CONF_VERIFY_TLS, DEFAULT_VERIFY_TLS))
+    try:
+        client = HermesClient(
+            async_get_clientsession(hass, verify_ssl=verify_tls),
+            url,
+            token,
+            request_timeout=REQUEST_TIMEOUT,
+            inference_timeout=INFERENCE_TIMEOUT,
+        )
+    except HermesError as err:
+        raise ConfigEntryAuthFailed("Hermes Companion connection data is invalid") from err
+    connection = await async_probe(client)
+    if connection.code == CONN_AUTH_FAILED:
+        raise ConfigEntryAuthFailed("Hermes Companion rejected the token")
+    if connection.code != CONN_OK:
+        # Not an error of this entry's data: retried by Home Assistant with back-off.
+        raise ConfigEntryNotReady(f"Hermes Companion not usable ({connection.code})")
+    speech = SpeechMemoryStore(hass)
+    await speech.async_load()
+    entry.runtime_data = RouterRuntime(
+        bridge=RouterBridge.from_options(entry.options, stats=runtime_stats(hass)),
+        client=client,
+        connection=connection,
+        speech=speech,
+        speech_enabled=entry.options.get(CONF_SPEECH_MEMORY, DEFAULT_SPEECH_MEMORY) is True,
+    )
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await _async_setup_alarm_services(hass, entry)
+    _LOGGER.debug("Kinetic Voice Router set up (mode=%s)", entry.runtime_data.bridge.mode.value)
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: KineticVoiceRouterConfigEntry) -> bool:
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        registry = hass.data.pop(ALARM_REGISTRY_KEY, None)
+        if registry is not None:
+            registry.unregister(hass)
+    return unloaded
+
+
+async def _async_setup_alarm_services(hass: HomeAssistant, entry) -> None:
+    """Register the Nabu Core alarm services when they are configured.
+
+    Opt-in on purpose: without an ``alarm_db`` option nothing is registered, so a
+    plain conversation-agent installation behaves exactly as before. A missing
+    ``nabu_core`` package must never break the integration setup.
+    """
+    from .alarm_bridge import (
+        CONF_ALARM_TICK_SECONDS,
+        DEFAULT_TICK_SECONDS,
+        build_alarm_layer,
+        start_tick_timer,
+    )
+
+    try:
+        built = build_alarm_layer(hass, entry.options)
+    except Exception as error:  # noqa: BLE001 - optional dependency, must not break setup
+        _LOGGER.warning("Nabu Core alarm services stay disabled (%s)", type(error).__name__)
+        return
+    if built is None:
+        return
+    _, registry = built
+    registry.register(hass)
+    layer = built[0]
+    try:
+        interval = float(entry.options.get(CONF_ALARM_TICK_SECONDS, DEFAULT_TICK_SECONDS))
+    except (TypeError, ValueError):
+        interval = DEFAULT_TICK_SECONDS
+    try:
+        entry.async_on_unload(start_tick_timer(hass, layer, max(interval, 1.0)))
+    except Exception as error:  # noqa: BLE001 - the timer is optional in the stub lab
+        _LOGGER.warning("alarm tick timer unavailable (%s)", type(error).__name__)
+    hass.data[ALARM_REGISTRY_KEY] = registry
+    _LOGGER.debug("Nabu Core alarm services registered (tick every %ss)", interval)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: KineticVoiceRouterConfigEntry) -> None:
+    """The user deleted the integration: delete the learned word pairs as well."""
+    await SpeechMemoryStore(hass).async_remove()
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: KineticVoiceRouterConfigEntry) -> None:
+    """Options changed: reload so the new setting takes effect."""
+    await hass.config_entries.async_reload(entry.entry_id)
