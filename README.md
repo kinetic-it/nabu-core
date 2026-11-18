@@ -101,18 +101,42 @@ All services live under the `nabu_core` domain and answer with a mapping
 Nabu Core is the only writable alarm truth. Do not mirror alarms into Home Assistant helpers;
 the integration never reads them.
 
+## Verified on real hardware
+
+One supervised acceptance run on 2026-11-18 covered the whole chain against a real
+speaker: alarm created two minutes ahead, automatic release 1.2 seconds after the due
+time without any manual tick, audible ringing confirmed by the owner, stop confirmed,
+player back to `idle` 18 ms later, journal entry `stop_confirmed`, no second playback on
+the next tick, test alarm removed. 19 of 19 steps passed.
+
+Scope of that evidence: **one alarm, one speaker, one run.** It shows that the chain
+works end to end. It is not evidence of unattended operation.
+
 ## Known limitations
 
-- No real audio output has been verified. A successful `play_media` call means *accepted*,
-  not *audible*.
-- No Echo device, speaker or production Home Assistant was involved. Device ids in the
-  examples are placeholders.
+- A successful `play_media` call means *accepted*, not *audible*. Audibility is only
+  established when a human confirms it; the code never claims silence or sound on its own.
+- No long-term operation has been validated. Not tested: a Home Assistant restart while
+  ringing, several alarms due at the same instant on real hardware, weekly series on a
+  real device, and interaction with alarms owned by Alexa itself.
 - The opt-in alarm layer registers an automatic Home Assistant scheduler tick (20 seconds by
-  default) and unregisters it on unload. The tick was verified in the laboratory; real-device
-  timing and unattended operation have not been validated. No extra automation is required.
+  default) and unregisters it on unload. No extra automation is required.
 - The media player is the only output channel; there is no fallback and no parallel ringing.
+  If a device is not on the allowlist, nothing is played — there is no substitute device.
 - Voice handling covers the documented German forms. Everything else deliberately asks back.
 - The web GUI does not exist yet; the services are the interface.
+
+## Optional: talking to a remote Home Assistant
+
+`nabu_core/mcp_ha.py` contains a small client that addresses a speaker through an existing
+Home Assistant MCP endpoint instead of a REST token. It exists for development and
+diagnostics: it lets the engine drive a real speaker from a workstation without installing
+anything in the running Home Assistant.
+
+This path is optional and is **not** needed for normal alarm operation. It is not a second
+alarm backend and stores no state. The endpoint URL carries a secret, so it is read from
+the environment and must never be committed or logged. The same module family includes
+`nabu_core/remote_ha.py`, a plain REST client used for the same diagnostic purpose.
 
 ## Licence
 

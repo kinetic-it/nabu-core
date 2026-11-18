@@ -6,6 +6,20 @@ pre-releases and **not** a recommendation for production use.
 
 ## [Unreleased]
 
+### Verified
+- Supervised hardware acceptance on a real speaker: alarm release 1.2 s after due time
+  without a manual tick, audible ringing confirmed by the owner, confirmed stop, journal
+  `stop_confirmed`, no replay, 19/19 steps. One alarm, one device, one run.
+
+### Added
+- `nabu_core/mcp_ha.py`: optional client for driving a speaker through an existing Home
+  Assistant MCP endpoint, with tests. Development and diagnostics only.
+- `nabu_core/remote_ha.py`: optional REST client with the same purpose, with tests.
+- The media adapter holds the ring phase for a bounded time and can repeat the sound while
+  the phase runs, so a short audio file keeps ringing until stopped.
+- Regression tests for the ring phase, stop shortening a running ring, and a denied device
+  never reaching the network.
+
 ### CI
 
 - `hassfest` and `hacs/action` pinned to commit SHAs instead of moving branches; Dependabot added for GitHub Actions and pip.

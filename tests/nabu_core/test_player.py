@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from nabu_core.devices import DeviceDenied, DevicePolicy
@@ -158,9 +160,11 @@ async def test_unreadable_state_keeps_playback_unconfirmed():
 async def test_gated_player_fits_the_existing_serial_dispatcher():
     from nabu_core.dispatch import SerialDispatcher
 
-    client = FakeMediaClient(state="idle", states=["playing"])
-    adapter = MediaPlayerAdapter(client, policy(), media=("audio/wav", "media-source://x"))
-    dispatcher = SerialDispatcher(adapter, allowed_targets={LIVING_ROOM}, max_seconds=1)
+    client = FakeMediaClient(state="idle", states=["playing", "idle"])
+    adapter = MediaPlayerAdapter(
+        client, policy(), media=("audio/wav", "media-source://x"), max_seconds=0.4
+    )
+    dispatcher = SerialDispatcher(adapter, allowed_targets={LIVING_ROOM}, max_seconds=5)
 
     result = await dispatcher.ring(LIVING_ROOM)
 
@@ -181,3 +185,35 @@ async def test_gated_player_denies_before_any_client_call():
     assert result.status == "failed"
     assert result.detail == "DeviceDenied"
     assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_play_holds_the_ring_phase_for_the_bounded_time():
+    """A ring must not end the moment the command was accepted."""
+    client = FakeMediaClient(state="idle", states=["playing", "idle"])
+    adapter = MediaPlayerAdapter(
+        client, policy(), media=("audio/wav", "media-source://x"), max_seconds=0.6
+    )
+
+    started = asyncio.get_running_loop().time()
+    await adapter.play(LIVING_ROOM)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert 0.5 <= elapsed < 2.0
+    assert ("stop", LIVING_ROOM) in client.calls
+
+
+@pytest.mark.asyncio
+async def test_stop_shortens_a_running_ring():
+    client = FakeMediaClient(state="idle", states=["playing", "idle"])
+    adapter = MediaPlayerAdapter(
+        client, policy(), media=("audio/wav", "media-source://x"), max_seconds=30
+    )
+
+    task = asyncio.create_task(adapter.play(LIVING_ROOM))
+    await asyncio.sleep(0.2)
+    outcome = await adapter.stop(LIVING_ROOM, wait=1.0, interval=0.05)
+    await asyncio.wait_for(task, timeout=5)
+
+    assert outcome.status is PlaybackStatus.STOPPED_CONFIRMED
+    assert task.done()

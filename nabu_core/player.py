@@ -56,6 +56,7 @@ class MediaPlayerAdapter:
         *,
         media: tuple[str, str],
         max_seconds: float = 600.0,
+        repeat: bool = False,
     ) -> None:
         if not 0 < max_seconds <= 3600:
             raise ValueError("max_seconds must be positive and at most 3600")
@@ -63,6 +64,10 @@ class MediaPlayerAdapter:
         self._policy = policy
         self._media = media
         self._max_seconds = max_seconds
+        self._start_timeout = min(max_seconds, 5.0)
+        self._stop_timeout = min(max_seconds, 5.0)
+        self._stop_requested = asyncio.Event()
+        self._repeat = repeat
 
     @property
     def policy(self) -> DevicePolicy:
@@ -102,6 +107,7 @@ class MediaPlayerAdapter:
     ) -> PlaybackOutcome:
         """Request a stop and report whether the entity stopped reporting playback."""
         target = self._policy.check(entity_id)
+        self._stop_requested.set()
         try:
             await self._client.stop(target)
         except Exception as error:
@@ -123,17 +129,46 @@ class MediaPlayerAdapter:
 
     # --- contract used by nabu_core.dispatch.SerialDispatcher -----------------
     async def play(self, entity_id: str) -> None:
-        """Dispatcher entry point: raises when the command was not accepted."""
-        outcome = await self.start(entity_id)
+        """Ring for at most ``max_seconds`` and then stop.
+
+        The call deliberately occupies the serial channel for the ring phase:
+        returning right after the command would end the dispatcher cycle while
+        the speaker is still playing, and a later stop would have nothing to
+        stop. A stop request shortens the ring phase instead of racing it.
+        """
+        target = self._policy.check(entity_id)
+        self._stop_requested.clear()
+        outcome = await self.start(target)
         if outcome.status is PlaybackStatus.FAILED:
             raise RuntimeError(f"play_media failed: {outcome.detail}")
-        # Accepted is enough to keep the channel occupied for the bounded
-        # ringing period; audible confirmation is a separate, explicit step.
-        while True:
-            outcome = await self.confirm_playing(entity_id, wait=1.0, interval=0.2)
-            if outcome.status is PlaybackStatus.PLAYING_CONFIRMED:
-                return
-            return
+
+        await self.confirm_playing(target, wait=self._start_timeout, interval=0.2)
+
+        deadline = asyncio.get_running_loop().time() + self._max_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            if self._stop_requested.is_set():
+                break
+            try:
+                await asyncio.wait_for(self._stop_requested.wait(), timeout=0.25)
+            except TimeoutError:
+                pass
+            if self._stop_requested.is_set():
+                break
+            if not self._repeat:
+                continue
+            try:
+                state = await self._client.get_state(target)
+            except Exception:  # noqa: BLE001, S112 - a failed probe must not end the ring
+                continue
+            if str(state).lower() not in PLAYING_STATES:
+                try:
+                    await self.start(target)
+                except Exception:  # noqa: BLE001, S112 - one failed retry is not fatal
+                    continue
+
+        # The ring phase ended: either it ran its course or a stop arrived.
+        # Both lead to an explicit stop request; "confirmed" stays separate.
+        await self.stop(target, wait=self._stop_timeout, interval=0.2)
 
     async def stop_request(self) -> bool:
         """Bounded stop helper for the dispatcher; True only on confirmation."""
