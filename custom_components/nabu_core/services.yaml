@@ -167,3 +167,18 @@ alarm_configure_catch_up:
       name: Catch-up enabled
       selector:
         boolean:
+
+alarm_utterance:
+  name: Handle a spoken alarm sentence
+  description: >-
+    Parse one German sentence with the same rules the conversation router uses and
+    execute the resulting alarm command. Intended for a sentence trigger, which
+    Home Assistant evaluates before its own local intents.
+  fields:
+    text:
+      name: Sentence
+      description: The recognised sentence, for example "Erstelle einen Wecker namens Pilot in 2 Minuten".
+      required: true
+      example: Erstelle einen Wecker namens Pilot in 2 Minuten
+      selector:
+        text:

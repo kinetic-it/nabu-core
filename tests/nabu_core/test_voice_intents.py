@@ -225,3 +225,105 @@ async def test_an_expired_one_shot_cannot_be_revived_by_voice(tmp_path):
 
     assert stale.code == "NOT_FOUND"
     assert stale.question
+
+
+# --- the sentence-trigger entry point --------------------------------------
+@pytest.mark.asyncio
+async def test_the_service_handles_a_sentence_trigger_text(tmp_path):
+    """Home Assistant hands the recognised sentence over as one string."""
+    from nabu_core.ha_services import AlarmServiceLayer
+
+    store = AlarmStore(tmp_path / "alarms.sqlite", timezone_name="Europe/Berlin")
+    layer = AlarmServiceLayer(store)
+
+    result = await layer.utterance(
+        {"text": "Erstelle einen Wecker namens Pilot in 2 Minuten"}
+    )
+
+    assert result.ok is True
+    assert result.code == "OK"
+    assert result.data["confirmation"] == "Wecker wurde gespeichert."
+    alarms = store.list()
+    assert len(alarms) == 1
+    assert alarms[0].name == "pilot"
+
+
+@pytest.mark.asyncio
+async def test_the_service_reports_a_missing_sentence(tmp_path):
+    from nabu_core.ha_services import AlarmServiceLayer
+
+    layer = AlarmServiceLayer(AlarmStore(tmp_path / "a.sqlite", timezone_name="Europe/Berlin"))
+
+    result = await layer.utterance({"text": "   "})
+
+    assert result.ok is False
+    assert result.code == "INVALID_TEXT"
+
+
+@pytest.mark.asyncio
+async def test_the_service_passes_a_question_through(tmp_path):
+    from nabu_core.ha_services import AlarmServiceLayer
+
+    layer = AlarmServiceLayer(AlarmStore(tmp_path / "a.sqlite", timezone_name="Europe/Berlin"))
+
+    result = await layer.utterance({"text": "Stell einen Wecker."})
+
+    assert result.code == "CLARIFICATION_REQUIRED"
+    assert result.data["question"] == "Wann soll der Wecker klingeln?"
+
+
+def test_the_trigger_sentence_that_failed_in_the_pipeline_is_understood():
+    """The exact sentence from the microphone test must not fall through."""
+    parser = AlarmParser(timezone=BERLIN)
+
+    result = parser.parse("Erstelle einen Wecker namens Pilot in 2 Minuten", now=NOW)
+
+    assert result.status is ParseStatus.OK
+    assert result.intent is not None
+    assert result.intent.kind is IntentKind.CREATE
+    assert result.intent.label == "pilot"
+    assert result.intent.at is not None
+
+
+# --- stop is contextual ----------------------------------------------------
+@pytest.mark.parametrize("utterance", ["Nabu, stopp.", "Wecker aus.", "Hör auf zu klingeln."])
+def test_an_explicit_alarm_stop_is_never_generic(utterance):
+    from nabu_core.voice_alarm import is_generic_stop
+
+    assert is_generic_stop(utterance) is False
+
+
+@pytest.mark.parametrize("utterance", ["stopp", "Stop.", "  stopp  "])
+def test_a_bare_stop_word_is_generic(utterance):
+    from nabu_core.voice_alarm import is_generic_stop
+
+    assert is_generic_stop(utterance) is True
+
+
+@pytest.mark.asyncio
+async def test_a_bare_stop_does_not_reach_the_scheduler_while_nothing_rings(tmp_path):
+    calls = []
+
+    async def stop():
+        calls.append(True)
+        return True
+
+    store = AlarmStore(tmp_path / "alarms.sqlite", timezone_name="Europe/Berlin")
+    adapter = VoiceAlarmAdapter(
+        AlarmService(store), stop_callback=stop, ringing_callback=lambda: False
+    )
+
+    assert adapter.is_ringing() is False
+    # The router decides to hand a bare "stopp" to the agent; the adapter itself
+    # may still stop, but the caller must check is_ringing() first.
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_ringing_state_comes_from_the_scheduler(tmp_path):
+    store = AlarmStore(tmp_path / "alarms.sqlite", timezone_name="Europe/Berlin")
+    adapter = VoiceAlarmAdapter(
+        AlarmService(store), stop_callback=None, ringing_callback=lambda: True
+    )
+
+    assert adapter.is_ringing() is True

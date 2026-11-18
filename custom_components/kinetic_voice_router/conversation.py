@@ -237,7 +237,7 @@ class KineticVoiceRouterConversationEntity(conversation.ConversationEntity):
         """
         from datetime import UTC, datetime
 
-        from .nabu_core.voice_alarm import merge_clarification
+        from .nabu_core.voice_alarm import is_generic_stop, merge_clarification
 
         registry = self.hass.data.get(_ALARM_REGISTRY_KEY)
         if registry is None:
@@ -253,6 +253,11 @@ class KineticVoiceRouterConversationEntity(conversation.ConversationEntity):
             merged = merge_clarification(pending[0], pending[1], text)
             if merged is not None:
                 text = merged
+
+        # A bare "stopp" belongs to us only while an alarm is ringing; otherwise
+        # it must reach the agent so music or other players stay unaffected.
+        if is_generic_stop(text) and not voice.is_ringing():
+            return None
 
         parsed = voice.parser.parse(text, now=datetime.now(UTC))
         # Compare the value, not the enum: a stale bundled copy would otherwise

@@ -265,10 +265,17 @@ class VoiceAlarmAdapter:
         service: AlarmService,
         *,
         stop_callback: Callable[[], Awaitable[bool | None]] | None = None,
+        ringing_callback: Callable[[], bool] | None = None,
     ) -> None:
         self.service = service
         self.parser = AlarmParser(timezone=service.store.zone)
         self.stop_callback = stop_callback
+        # A bare "stopp" only belongs to us while an alarm is actually ringing;
+        # otherwise it has to reach whatever else the user is talking to.
+        self.ringing_callback = ringing_callback
+
+    def is_ringing(self) -> bool:
+        return bool(self.ringing_callback and self.ringing_callback())
 
     async def handle(self, utterance: str, *, now: datetime) -> ApiResult:
         parsed = self.parser.parse(utterance, now=now)

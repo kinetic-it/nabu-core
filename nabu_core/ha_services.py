@@ -121,7 +121,40 @@ class AlarmServiceLayer:
         self.service = AlarmService(store)
         self.stop_callback = stop_callback
         self.scheduler = scheduler
-        self.voice = VoiceAlarmAdapter(self.service, stop_callback=self._voice_stop)
+        self.voice = VoiceAlarmAdapter(
+            self.service,
+            stop_callback=self._voice_stop,
+            ringing_callback=self._voice_ringing,
+        )
+
+    async def utterance(self, data: Mapping[str, Any]) -> ServiceResult:
+        """Run one spoken sentence through the same parser the router uses.
+
+        Home Assistant answers spoken alarms itself (``prefer_local_intents``)
+        before this integration is asked. A sentence trigger runs earlier than
+        the local intents and can hand the recognised sentence over here, so the
+        parsing rules stay in one place instead of being copied into YAML.
+        """
+        text = str(data.get("text") or "").strip()
+        if not text:
+            return ServiceResult(ok=False, code="INVALID_TEXT", message="text is required")
+        try:
+            result = await self.voice.handle(text, now=datetime.now(UTC))
+        except Exception as error:  # noqa: BLE001 - a spoken service must not crash
+            return _failure(error)
+        return ServiceResult(
+            ok=result.code in {"OK", "STOP_REQUESTED", "CLARIFICATION_REQUIRED"},
+            code=result.code,
+            data={
+                "confirmation": result.confirmation,
+                "question": result.question,
+                "alarm": alarm_state(result.alarm) if result.alarm is not None else None,
+            },
+            message=result.confirmation or result.question or result.code,
+        )
+
+    def _voice_ringing(self) -> bool:
+        return bool(self.scheduler is not None and self.scheduler.is_ringing())
 
     async def _voice_stop(self) -> bool:
         if self.stop_callback is None:

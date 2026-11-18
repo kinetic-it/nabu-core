@@ -475,6 +475,10 @@ class Scheduler:
 
         self.store._run_write(action)
 
+    def is_ringing(self) -> bool:
+        """Whether the dispatcher is playing right now."""
+        return bool(getattr(self.dispatcher, "ringing", False))
+
     async def stop(self, now: datetime) -> bool:
         """Durably fence due work, then request local adapter stop without claiming silence."""
         now = self._aware_utc(now)

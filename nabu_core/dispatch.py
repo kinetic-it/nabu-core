@@ -39,6 +39,11 @@ class SerialDispatcher:
         self._unsettled = set()
         self.last_stop_confirmed: bool | None = None
 
+    @property
+    def ringing(self) -> bool:
+        """True while a target is being played, so a stop can be contextual."""
+        return self._target is not None
+
     def _track(self, task):
         self._unsettled.add(task)
         task.add_done_callback(self._unsettled.discard)

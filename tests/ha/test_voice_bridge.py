@@ -145,3 +145,36 @@ async def test_stop_is_forwarded_and_never_promised_as_silence(tmp_path):
 
     assert calls == [True]
     assert reply == "Abbruch des Weckers wurde angefordert."
+
+
+@pytest.mark.asyncio
+async def test_a_bare_stop_without_a_ringing_alarm_falls_through(tmp_path):
+    """Music and other players must keep their own "stopp"."""
+    calls = []
+
+    async def stopped():
+        calls.append(True)
+        return True
+
+    voice, registry = build_voice(tmp_path, stopped=stopped)
+    stub = Stub(registry)
+
+    assert await run(stub, "stopp") is None
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_alarm_stop_still_works_without_ringing(tmp_path):
+    calls = []
+
+    async def stopped():
+        calls.append(True)
+        return True
+
+    _, registry = build_voice(tmp_path, stopped=stopped)
+    stub = Stub(registry)
+
+    reply = await run(stub, "Nabu, stopp.")
+
+    assert calls == [True]
+    assert reply == "Abbruch des Weckers wurde angefordert."

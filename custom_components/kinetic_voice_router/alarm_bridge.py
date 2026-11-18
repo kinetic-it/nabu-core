@@ -46,6 +46,9 @@ SERVICE_FIELDS: dict[str, tuple[str, ...]] = {
         "catchup_seconds",
         "catchup_enabled",
     ),
+    # Free-text entry point for a Home Assistant sentence trigger: the spoken
+    # sentence is parsed by the same rules the router uses.
+    "utterance": ("text",),
     "enable": ("id",),
     "disable": ("id",),
     "delete": ("id",),
@@ -59,7 +62,7 @@ SERVICE_FIELDS: dict[str, tuple[str, ...]] = {
 SYNC_SERVICES = frozenset(
     {"create", "update", "enable", "disable", "delete", "list", "status", "configure_catch_up"}
 )
-ASYNC_SERVICES = frozenset({"stop", "ring"})
+ASYNC_SERVICES = frozenset({"stop", "ring", "utterance"})
 
 CATCH_UP_DEFAULT_SECONDS = 300
 

@@ -1,0 +1,66 @@
+# Wecker per Sprache zu Nabu Core leiten
+#
+# Warum diese Datei existiert
+# ---------------------------
+# Die Assist-Pipeline "Speaker" läuft mit `prefer_local_intents: true` und dem
+# Agenten `conversation.kinetic_voice_router`. Home Assistant prüft dabei seine
+# eingebauten Intents (darunter `HassStartTimer`) VOR jedem Conversation-Agenten.
+# "Erstelle einen Wecker namens Pilot in 2 Minuten" wird deshalb als Timer
+# verarbeitet; der Router wird nie gefragt.
+#
+# Satz-Trigger laufen in der Pipeline VOR den lokalen Intents
+# (`async_handle_sentence_triggers` in default_pipeline.py). Ein Trigger, der nur
+# Sätze mit dem Wort "Wecker" abfängt, gewinnt gegen `HassStartTimer`, ohne
+# "Timer"-Sätze anzufassen.
+#
+# Aktivierung (erst nach Owner-Freigabe): Die Automation in die
+# Automations-Oberfläche übernehmen oder als YAML in `automations.yaml` ergänzen.
+# Diese Datei selbst wird von Home Assistant nicht geladen.
+#
+# Voraussetzung: Nabu-Core-Dienste sind aktiv (Option `alarm_db` gesetzt).
+
+alias: "Nabu Core – Wecker per Sprache"
+description: >-
+  Leitet gesprochene Weckerbefehle an Nabu Core, bevor Home Assistant sie als
+  Timer versteht. Timer-Befehle bleiben unberührt.
+mode: single
+max_exceeded: silent
+
+trigger:
+  - platform: conversation
+    command:
+      # --- anlegen ---
+      - "Wecker in {minutes} Minuten"
+      - "Erstelle einen Wecker in {minutes} Minuten"
+      - "Erstelle einen Wecker namens {name} in {minutes} Minuten"
+      - "Stell einen Wecker auf {hour} Uhr"
+      - "Erstelle einen Wecker namens {name} für {hour} Uhr"
+      - "Weck mich morgen um {hour} Uhr"
+      - "Stell einen Wecker für Montag bis Freitag um {hour} Uhr"
+      # --- abfragen ---
+      - "Welche Wecker habe ich"
+      - "Wann klingelt mein nächster Wecker"
+      - "Ist mein {name}wecker aktiviert"
+      # --- bearbeiten ---
+      - "Ändere den {name}wecker auf {hour} Uhr"
+      - "Deaktiviere meinen {name}wecker"
+      - "Aktiviere meinen {name}wecker wieder"
+      - "Lösche meinen {name}wecker"
+      # --- stoppen ---
+      - "Nabu stopp"
+      - "Wecker aus"
+      - "Hör auf zu klingeln"
+
+action:
+  - service: nabu_core.alarm_utterance
+    data:
+      text: "{{ trigger.sentence }}"
+    response_variable: nabu_antwort
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ nabu_antwort.code == 'CLARIFICATION_REQUIRED' }}"
+        sequence:
+          - stop: "{{ nabu_antwort.data.question }}"
+    default:
+      - stop: "{{ nabu_antwort.data.confirmation }}"

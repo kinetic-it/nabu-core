@@ -414,6 +414,16 @@ _LIST_PHRASES: Final[frozenset[str]] = frozenset(
 )
 
 
+#: A bare "stopp" is not an alarm command on its own - it could belong to music,
+#: a vacuum or anything else. It only reaches the alarm engine while one rings.
+_GENERIC_STOP_PHRASES: Final[frozenset[str]] = frozenset({"stopp", "stop"})
+
+
+def is_generic_stop(utterance: str) -> bool:
+    """Whether this is a bare stop word without an alarm reference."""
+    return _normalise(utterance) in _GENERIC_STOP_PHRASES
+
+
 def _is_stop(text: str) -> bool:
     return text in _STOP_PHRASES
 
@@ -572,10 +582,11 @@ def _weekly_weekday(text: str) -> int | None:
 
 def _matches_relative_create(text: str) -> bool:
     verb = rf"(?:{_CREATE_VERB} (?:mir )?)?"
+    named = r"(?: (?:namens|namen) [a-zäöüß]+)?"
     return bool(
         re.fullmatch(
-            rf"{verb}(?:(?:einen )?{_ALARM_PATTERN} in \S+ minuten?"
-            rf"|in \S+ minuten einen {_ALARM_PATTERN})",
+            rf"{verb}(?:(?:einen )?{_ALARM_PATTERN}{named} in \S+ minuten?"
+            rf"|in \S+ minuten (?:einen )?{_ALARM_PATTERN}{named})",
             text,
         )
     )
