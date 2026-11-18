@@ -54,6 +54,21 @@ from .voice_router.state import ProposalStatus
 
 _LOGGER = logging.getLogger(__name__)
 
+_ALARM_REGISTRY_KEY = "kinetic_voice_router_alarm_services"
+
+# Utterances the alarm parser does not own belong to the chat agent.
+_ALARM_SILENT_CODES = frozenset(
+    {"unsupported_utterance", "invalid_input", "negated_utterance", "unsupported_tokens"}
+)
+
+_ALARM_REPLIES = {
+    "NOT_FOUND": "Diesen Wecker kenne ich nicht.",
+    "AMBIGUOUS_SELECTOR": "Mehrere Wecker passen. Welchen meinst du?",
+    "STOP_FAILED": "Der Wecker ließ sich nicht stoppen.",
+    "INVALID_INTENT": "Das habe ich nicht verstanden.",
+    "NO_TARGET": "Es ist kein Ausgabegerät freigegeben.",
+}
+
 HERMES_FAILED = "Hermes Agent could not process the request."
 # Errors the router treats as an answer-level failure of the Hermes call.
 _HERMES_ERRORS = (HermesError, TypeError, ValueError)
@@ -77,6 +92,7 @@ class KineticVoiceRouterConversationEntity(conversation.ConversationEntity):
         self._entry = entry
         self._attr_name = NAME
         self._attr_unique_id = f"{entry.entry_id}-conversation"
+        self._alarm_pending: dict[str, tuple[str, str]] = {}
 
     @property
     def _runtime(self) -> RouterRuntime:
@@ -118,6 +134,11 @@ class KineticVoiceRouterConversationEntity(conversation.ConversationEntity):
                 bridge.observe(text=user_input.text, language=user_input.language)
             except Exception as err:  # noqa: BLE001 - observation must never affect a turn
                 _LOGGER.debug("Observation failed (%s)", type(err).__name__)
+
+        # 0. Alarm commands run locally and never leave the house.
+        alarm_reply = await self._try_alarm(user_input)
+        if alarm_reply is not None:
+            return self._answer(user_input, chat_log, alarm_reply, arm_followup=False)
 
         # HA's chat session ID is always set; user_input.conversation_id may be None.
         session_id = getattr(chat_log, "conversation_id", None) or user_input.conversation_id
@@ -207,6 +228,56 @@ class KineticVoiceRouterConversationEntity(conversation.ConversationEntity):
                 response=response, conversation_id=user_input.conversation_id
             )
         return self._answer(user_input, chat_log, text)
+
+    async def _try_alarm(self, user_input) -> str | None:
+        """Answer an alarm command locally, without touching the chat agent.
+
+        Returns ``None`` when the utterance is no alarm command, so the normal
+        router path runs unchanged.
+        """
+        from datetime import UTC, datetime
+
+        from .nabu_core.voice_alarm import merge_clarification
+
+        registry = self.hass.data.get(_ALARM_REGISTRY_KEY)
+        if registry is None:
+            return None
+        voice = getattr(getattr(registry, "layer", None), "voice", None)
+        if voice is None:
+            return None
+
+        session = getattr(user_input, "conversation_id", None) or "default"
+        text = user_input.text
+        pending = self._alarm_pending.pop(session, None)
+        if pending is not None:
+            merged = merge_clarification(pending[0], pending[1], text)
+            if merged is not None:
+                text = merged
+
+        parsed = voice.parser.parse(text, now=datetime.now(UTC))
+        # Compare the value, not the enum: a stale bundled copy would otherwise
+        # make every identity check silently fail.
+        status = str(getattr(parsed.status, "value", parsed.status))
+        if status == "clarification":
+            self._alarm_pending[session] = (text, parsed.code or "")
+            return parsed.question
+        if status == "error":
+            if (parsed.code or "") in _ALARM_SILENT_CODES:
+                return None
+            return _ALARM_REPLIES.get(parsed.code or "", "Das habe ich nicht verstanden.")
+        if parsed.intent is None:
+            return None
+
+        try:
+            result = await voice.handle(text, now=datetime.now(UTC))
+        except Exception as err:  # noqa: BLE001 - the chat must survive a broken alarm
+            _LOGGER.warning("Alarm voice path failed (%s)", type(err).__name__)
+            return None
+        if result.question:
+            return result.question
+        if result.confirmation:
+            return result.confirmation
+        return _ALARM_REPLIES.get(result.code or "", "Das konnte ich nicht ausführen.")
 
     async def _ask_hermes(
         self, messages: list[dict[str, str]], session_id: str | None, language: str | None

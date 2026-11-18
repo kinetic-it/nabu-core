@@ -24,6 +24,7 @@ import asyncio
 import errno
 import os
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -79,6 +80,7 @@ class Scheduler:
         target: str,
         *,
         max_catchup: timedelta = timedelta(seconds=DEFAULT_CATCHUP_SECONDS),
+        alarm_filter: Callable[[Alarm], bool] | None = None,
     ) -> None:
         if not isinstance(max_catchup, timedelta) or max_catchup < timedelta(0):
             raise ValueError("max_catchup must be a non-negative timedelta")
@@ -86,6 +88,10 @@ class Scheduler:
         self.dispatcher = dispatcher
         self.target = target
         self.max_catchup = max_catchup
+        # The pilot mode narrows which alarms this scheduler may ring. Stored
+        # alarms outside the filter stay untouched and unclaimed, so switching
+        # the pilot off restores the full set without any migration.
+        self.alarm_filter = alarm_filter
         self.diagnostics: list[tuple[str, str]] = []
         self._last_stop_ids: list[str] = []
         self._owner_id = str(uuid4())
@@ -257,6 +263,8 @@ class Scheduler:
         for alarm in self.store.list():
             if not alarm.enabled:
                 continue
+            if self.alarm_filter is not None and not self.alarm_filter(alarm):
+                continue
             if alarm.kind == "once":
                 if alarm.when_utc is None:
                     raise ValueError("once alarm has no due time")
@@ -372,9 +380,22 @@ class Scheduler:
                 raise RuntimeError("claimed occurrence disappeared")
             if cursor.rowcount != 1 and row["status"] == "in_flight":
                 raise RuntimeError("occurrence claim was lost before terminal persistence")
+            self._retire_once_alarm(db, row["alarm_id"])
             return self._from_row(row)
 
         return self.store._run_write(action)
+
+    @staticmethod
+    def _retire_once_alarm(db: sqlite3.Connection, alarm_id: str) -> None:
+        """A one-shot alarm is spent once it has run; keep the row, drop the schedule.
+
+        Without this an expired one-shot stays ``enabled`` with a due time in the
+        past. The occurrence journal stops it from ringing twice, but the alarm
+        keeps showing up as active, and hosts that list alarms cannot tell a
+        spent alarm from a pending one. Recurring alarms are untouched: they move
+        on to their next occurrence.
+        """
+        db.execute("UPDATE alarms SET enabled=0 WHERE id=? AND kind='once'", (alarm_id,))
 
     def _is_still_dispatchable(self, occurrence: Occurrence, epoch: int) -> bool:
         """Fence the last DB-visible state before dispatch; player start still races stop."""

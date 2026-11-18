@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from custom_components.kinetic_voice_router import (
@@ -14,6 +16,7 @@ from custom_components.kinetic_voice_router.alarm_bridge import (
 
 # the integration uses its bundled copy, so patch exactly that class
 from custom_components.kinetic_voice_router.nabu_core.player import MediaPlayerAdapter
+from nabu_core.alarm_engine import AlarmStore
 
 
 class FakeConfig:
@@ -140,3 +143,14 @@ async def test_adapter_repeats_the_sound_until_stopped(tmp_path, monkeypatch):
 
     assert captured["repeat"] is True
     assert captured["max_seconds"] == 45.0
+
+
+def test_pilot_label_matching_ignores_case_and_wecker_suffix(tmp_path):
+    from custom_components.kinetic_voice_router.alarm_bridge import _pilot_filter
+
+    store = AlarmStore(tmp_path / "alarms.sqlite")
+    named = store.create(timedelta(hours=1), name="Pilot", now=datetime.now(UTC))
+    matches = _pilot_filter("pilotwecker")
+
+    assert matches(named) is True
+    assert matches(store.create(timedelta(hours=1), name="Anderer", now=datetime.now(UTC))) is False

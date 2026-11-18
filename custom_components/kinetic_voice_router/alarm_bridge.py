@@ -72,6 +72,10 @@ CONF_ALARM_MEDIA = "alarm_media"
 CONF_ALARM_MEDIA_TYPE = "alarm_media_type"
 CONF_ALARM_RING_SECONDS = "alarm_ring_seconds"
 CONF_ALARM_TICK_SECONDS = "alarm_tick_seconds"
+#: Optional pilot label. When set, this scheduler rings only alarms carrying that
+#: name. Every other stored alarm stays untouched and silent, so the pilot can be
+#: switched off by removing the option - no migration, no second engine.
+CONF_ALARM_PILOT = "alarm_pilot"
 
 #: A scheduler tick every 20 seconds keeps the firing delay short without busy
 #: looping. One tick claims and plays at most one occurrence per alarm.
@@ -145,6 +149,8 @@ def build_alarm_layer(hass, options: Mapping[str, Any]):
     policy = DevicePolicy(allowed=allowed, denied=denied)
     media_id = options.get(CONF_ALARM_MEDIA, "alarm.wav")
     media_type = options.get(CONF_ALARM_MEDIA_TYPE, "music")
+    pilot = str(options.get(CONF_ALARM_PILOT) or "").strip()
+    pilot_filter = _pilot_filter(pilot) if pilot else None
     ring_seconds = float(options.get(CONF_ALARM_RING_SECONDS, 120))
     adapter = MediaPlayerAdapter(
         HomeAssistantMediaClient(hass, media_id, media_type),
@@ -158,11 +164,24 @@ def build_alarm_layer(hass, options: Mapping[str, Any]):
     dispatcher = SerialDispatcher(
         adapter, allowed_targets=set(allowed), max_seconds=ring_seconds + 10
     )
-    scheduler = Scheduler(store, dispatcher, allowed[0])
+    scheduler = Scheduler(store, dispatcher, allowed[0], alarm_filter=pilot_filter)
     layer = AlarmServiceLayer(
         store, stop_callback=lambda: scheduler.stop(datetime.now(UTC)), scheduler=scheduler
     )
     return layer, AlarmServiceRegistry(layer)
+
+
+def _pilot_key(name: str) -> str:
+    key = " ".join(name.casefold().replace("-", " ").split()).replace(" ", "")
+    if key.endswith("wecker") and len(key) > len("wecker"):
+        key = key[: -len("wecker")]
+    return key
+
+
+def _pilot_filter(label: str):
+    """Only alarms with this name may ring while the pilot runs."""
+    wanted = _pilot_key(label)
+    return lambda alarm: alarm.name is not None and _pilot_key(alarm.name) == wanted
 
 
 def start_tick_timer(hass, layer, interval_seconds: float = DEFAULT_TICK_SECONDS):

@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Final
 
 from nabu_core.alarm_engine import Alarm, AlarmError, AlarmStore
@@ -117,16 +117,52 @@ class AlarmService:
             return self._failure(error)
 
     def delete_matching_label(self, label: str) -> ApiResult:
-        return self._mutate_unique(
-            lambda alarm: alarm.name is not None and alarm.name.casefold() == label.casefold(),
-            delete=True,
-        )
+        return self._mutate_unique(_match_label(label), delete=True)
 
     def disable_matching_label(self, label: str) -> ApiResult:
+        return self._mutate_unique(_match_label(label), delete=False)
+
+    def enable_matching_label(self, label: str, *, now: datetime) -> ApiResult:
+        matches = _match_label(label)
         return self._mutate_unique(
-            lambda alarm: alarm.name is not None and alarm.name.casefold() == label.casefold(),
+            lambda alarm: matches(alarm) and _can_be_enabled(alarm, now),
             delete=False,
+            enabled=True,
         )
+
+    def update_matching_label(
+        self, label: str, *, hour: int, minute: int, now: datetime
+    ) -> ApiResult:
+        """Move one named alarm to another clock time, keeping its recurrence."""
+        matches = _match_label(label)
+        selected = [alarm for alarm in self.store.list() if matches(alarm)]
+        if not selected:
+            return ApiResult(code="NOT_FOUND")
+        if len(selected) != 1:
+            return ApiResult(code="AMBIGUOUS_SELECTOR")
+        alarm = selected[0]
+        zone = self.store.zone
+        local_now = now.astimezone(zone)
+        if alarm.weekdays:
+            return self.update(
+                alarm.id,
+                when=datetime.combine(local_now.date(), time(hour, minute), tzinfo=zone),
+                weekdays=alarm.weekdays,
+                now=now,
+            )
+        target = datetime.combine(local_now.date(), time(hour, minute), tzinfo=zone)
+        if target <= local_now:
+            target += timedelta(days=1)
+        return self.update(alarm.id, when=target, now=now)
+
+    def status_matching_label(self, label: str) -> ApiResult:
+        matches = _match_label(label)
+        selected = [alarm for alarm in self.store.list() if matches(alarm)]
+        if not selected:
+            return ApiResult(code="NOT_FOUND")
+        if len(selected) != 1:
+            return ApiResult(code="AMBIGUOUS_SELECTOR")
+        return ApiResult(code="OK", alarm=selected[0])
 
     def disable_matching_date(self, selected_date: date) -> ApiResult:
         return self._mutate_unique(
@@ -138,7 +174,13 @@ class AlarmService:
             delete=False,
         )
 
-    def _mutate_unique(self, matches: Callable[[Alarm], bool], *, delete: bool) -> ApiResult:
+    def _mutate_unique(
+        self,
+        matches: Callable[[Alarm], bool],
+        *,
+        delete: bool,
+        enabled: bool | None = None,
+    ) -> ApiResult:
         def action(db: sqlite3.Connection) -> ApiResult:
             selected = [self.store._from_row(row) for row in db.execute("SELECT * FROM alarms")]
             matched = [alarm for alarm in selected if matches(alarm)]
@@ -156,8 +198,8 @@ class AlarmService:
                     return ApiResult(code="NOT_FOUND")
                 return ApiResult(code="OK")
             cursor = db.execute(
-                "UPDATE alarms SET enabled = 0 WHERE id = ? AND instance_id = ?",
-                (alarm.id, alarm.instance_id),
+                "UPDATE alarms SET enabled = ? WHERE id = ? AND instance_id = ?",
+                (1 if enabled else 0, alarm.id, alarm.instance_id),
             )
             if cursor.rowcount != 1:
                 return ApiResult(code="NOT_FOUND")
@@ -173,6 +215,46 @@ class AlarmService:
             return self.store._run_write(action)
         except Exception as error:
             return self._failure(error)
+
+
+def _display(name: str | None) -> str:
+    text = name or "Wecker"
+    return text[:1].upper() + text[1:]
+
+
+def _label_key(name: str) -> str:
+    """Treat "Frühschicht", "frühschicht-wecker" and "Frühschichtwecker" as one name."""
+    key = name.casefold().replace("-", " ").strip()
+    key = " ".join(key.split())
+    compact = key.replace(" ", "")
+    if compact.endswith("wecker") and len(compact) > len("wecker"):
+        compact = compact[: -len("wecker")]
+    return compact
+
+
+def _match_label(label: str) -> Callable[[Alarm], bool]:
+    wanted = _label_key(label)
+    return lambda alarm: alarm.name is not None and _label_key(alarm.name) == wanted
+
+
+def _next_due(alarm: Alarm, *, now: datetime | None = None, zone=None) -> datetime | None:
+    """When this alarm rings next, or ``None`` when it cannot ring any more."""
+    if alarm.kind == "once":
+        return alarm.when_utc
+    if not alarm.weekdays or alarm.local_time is None or zone is None:
+        return None
+    from .recurrence import next_weekly  # noqa: PLC0415
+
+    reference = (now or datetime.now(UTC)).astimezone(UTC)
+    wall = time.fromisoformat(alarm.local_time)
+    return next_weekly(reference, wall, alarm.weekdays, zone)
+
+
+def _can_be_enabled(alarm: Alarm, now: datetime) -> bool:
+    """An expired one-shot cannot be revived by voice; nothing would ever ring."""
+    if alarm.kind != "once" or alarm.when_utc is None:
+        return True
+    return alarm.when_utc.astimezone(UTC) > now.astimezone(UTC)
 
 
 class VoiceAlarmAdapter:
@@ -204,7 +286,13 @@ class VoiceAlarmAdapter:
             return self._confirmed(result, "Wecker wurde gespeichert.")
         if intent.kind is IntentKind.LIST:
             result = self.service.list()
-            return self._confirmed(result, "Wecker wurden aufgelistet.")
+            return self._list_confirmation(result, next_only=intent.next_only)
+        if intent.kind is IntentKind.STATUS:
+            return self._status(intent)
+        if intent.kind is IntentKind.UPDATE:
+            return self._update(intent, now=now)
+        if intent.kind is IntentKind.ACTIVATE:
+            return self._activate(intent, now=now)
         if intent.kind is IntentKind.DELETE:
             return self._delete_by_label(intent.label)
         if intent.kind is IntentKind.DEACTIVATE:
@@ -212,6 +300,86 @@ class VoiceAlarmAdapter:
         if intent.kind is IntentKind.STOP:
             return await self._stop()
         return ApiResult(code="NOT_IMPLEMENTED")
+
+    def _list_confirmation(self, result: ApiResult, *, next_only: bool) -> ApiResult:
+        if result.code != "OK":
+            return result
+        zone = self.service.store.zone
+        alarms = list(result.alarms or ())
+        if next_only:
+            pending = sorted(
+                (alarm for alarm in alarms if alarm.enabled and _next_due(alarm, zone=zone)),
+                key=lambda alarm: _next_due(alarm, zone=zone) or datetime.max.replace(tzinfo=UTC),
+            )
+            if not pending:
+                return ApiResult(
+                    code="OK", alarms=tuple(alarms), confirmation="Es ist kein Wecker geplant."
+                )
+            upcoming = pending[0]
+            due = _next_due(upcoming, zone=zone)
+            return ApiResult(
+                code="OK",
+                alarms=tuple(alarms),
+                confirmation=(
+                    f"Der nächste Wecker ist {_display(upcoming.name or upcoming.id)} "
+                    f"um {due.astimezone(self.service.store.zone):%H:%M}."
+                ),
+            )
+        active = [alarm for alarm in alarms if alarm.enabled]
+        return ApiResult(
+            code="OK",
+            alarms=tuple(alarms),
+            confirmation=f"Es sind {len(active)} von {len(alarms)} Weckern aktiviert.",
+        )
+
+    def _status(self, intent: AlarmIntent) -> ApiResult:
+        if not intent.label:
+            return ApiResult(code="INVALID_INTENT")
+        result = self.service.status_matching_label(intent.label)
+        if result.code == "AMBIGUOUS_SELECTOR":
+            return ApiResult(
+                code=result.code,
+                question="Mehrere Wecker haben diesen Namen. Welchen meinst du?",
+            )
+        if result.code != "OK" or result.alarm is None:
+            return result
+        state = "aktiviert" if result.alarm.enabled else "deaktiviert"
+        return ApiResult(
+            code="OK",
+            alarm=result.alarm,
+            confirmation=f"Der Wecker {_display(result.alarm.name)} ist {state}.",
+        )
+
+    def _update(self, intent: AlarmIntent, *, now: datetime) -> ApiResult:
+        if not intent.label or None in (intent.time_hour, intent.time_minute):
+            return ApiResult(code="INVALID_INTENT")
+        result = self.service.update_matching_label(
+            intent.label, hour=intent.time_hour, minute=intent.time_minute, now=now
+        )
+        if result.code == "AMBIGUOUS_SELECTOR":
+            return ApiResult(
+                code=result.code,
+                question="Mehrere Wecker haben diesen Namen. Welchen meinst du?",
+            )
+        if result.code == "NOT_FOUND":
+            return ApiResult(code=result.code, question="Diesen Wecker kenne ich nicht.")
+        return self._confirmed(result, "Wecker wurde geändert.")
+
+    def _activate(self, intent: AlarmIntent, *, now: datetime) -> ApiResult:
+        if not intent.label:
+            return ApiResult(code="INVALID_INTENT")
+        result = self.service.enable_matching_label(intent.label, now=now)
+        if result.code == "AMBIGUOUS_SELECTOR":
+            return ApiResult(
+                code=result.code,
+                question="Mehrere Wecker haben diesen Namen. Welchen meinst du?",
+            )
+        if result.code == "NOT_FOUND":
+            return ApiResult(
+                code=result.code,
+                question="Diesen Wecker kenne ich nicht oder seine Zeit ist vorbei.",
+            )
+        return self._confirmed(result, "Wecker wurde aktiviert.")
 
     def _create(self, intent: AlarmIntent, *, now: datetime) -> ApiResult:
         if intent.at is not None:

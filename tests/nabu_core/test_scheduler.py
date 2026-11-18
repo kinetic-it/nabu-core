@@ -545,3 +545,104 @@ async def test_confirmed_stop_marks_the_occurrence_as_confirmed(tmp_path):
     )
     assert confirmed is True
     assert details == ["stop_confirmed"]
+
+
+@pytest.mark.asyncio
+async def test_once_alarm_is_retired_after_it_ran(tmp_path):
+    """A spent one-shot must not look pending and must not be scheduled again."""
+    store = AlarmStore(tmp_path / "alarms.sqlite")
+    created = due(store)
+    player = FakePlayer()
+    scheduler = Scheduler(store, dispatcher(player), "fake-player")
+
+    await scheduler.tick(NOW)
+
+    assert store.get(created.id).enabled is False
+    assert store.get(created.id).name == created.name
+    assert [occurrence.status for occurrence in scheduler.occurrences()] == ["completed"]
+
+
+@pytest.mark.asyncio
+async def test_once_alarm_stays_silent_after_a_restart(tmp_path):
+    store = AlarmStore(tmp_path / "alarms.sqlite")
+    due(store)
+    player = FakePlayer()
+
+    await Scheduler(store, dispatcher(player), "fake-player").tick(NOW)
+    later = Scheduler(store, dispatcher(player), "fake-player")
+    assert await later.tick(NOW + timedelta(minutes=5)) == []
+
+    assert player.started == ["fake-player"]
+    assert len(later.occurrences()) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_once_alarm_is_not_retried_forever(tmp_path):
+    """A broken player must not turn a one-shot into a repeating attempt."""
+    store = AlarmStore(tmp_path / "alarms.sqlite")
+    created = due(store)
+    player = FakePlayer()
+    player.fail = True
+    scheduler = Scheduler(store, dispatcher(player), "fake-player")
+
+    await scheduler.tick(NOW)
+
+    assert store.get(created.id).enabled is False
+    assert await scheduler.tick(NOW + timedelta(minutes=1)) == []
+
+
+@pytest.mark.asyncio
+async def test_recurring_alarm_keeps_its_next_occurrence(tmp_path):
+    store = AlarmStore(tmp_path / "alarms.sqlite")
+    weekly = store.create(
+        timedelta(minutes=25),
+        weekdays={NOW.weekday()},
+        now=NOW - timedelta(hours=1),
+        name="weekly",
+    )
+    player = FakePlayer()
+    scheduler = Scheduler(store, dispatcher(player), "fake-player")
+
+    await scheduler.tick(NOW)
+
+    assert store.get(weekly.id).enabled is True
+    assert len(scheduler.occurrences()) == 1
+
+
+@pytest.mark.asyncio
+async def test_pilot_filter_rings_only_the_named_alarm(tmp_path):
+    """With the pilot on, every other stored alarm stays silent and unclaimed."""
+    store = AlarmStore(tmp_path / "alarms.sqlite")
+    pilot = due(store, name="pilot")
+    other = due(store, name="frühschicht")
+    player = FakePlayer()
+    scheduler = Scheduler(
+        store,
+        dispatcher(player),
+        "fake-player",
+        alarm_filter=lambda alarm: alarm.name == "pilot",
+    )
+
+    await scheduler.tick(NOW)
+
+    assert [occurrence.alarm_id for occurrence in scheduler.occurrences()] == [pilot.id]
+    assert store.get(other.id).enabled is True
+    assert player.started == ["fake-player"]
+    assert [o.alarm_id for o in scheduler.occurrences()] == [pilot.id]
+
+
+@pytest.mark.asyncio
+async def test_switching_the_pilot_off_restores_every_alarm(tmp_path):
+    store = AlarmStore(tmp_path / "alarms.sqlite")
+    due(store, name="pilot")
+    due(store, name="frühschicht")
+    player = FakePlayer()
+
+    await Scheduler(
+        store, dispatcher(player), "fake-player", alarm_filter=lambda alarm: False
+    ).tick(NOW)
+    assert player.started == []
+
+    await Scheduler(store, dispatcher(player), "fake-player").tick(NOW)
+
+    assert player.started == ["fake-player", "fake-player"]

@@ -13,8 +13,11 @@ from zoneinfo import ZoneInfo
 class IntentKind(str, Enum):  # noqa: UP042
     CREATE = "create"
     LIST = "list"
-    DELETE = "delete"
+    STATUS = "status"
+    UPDATE = "update"
+    ACTIVATE = "activate"
     DEACTIVATE = "deactivate"
+    DELETE = "delete"
     STOP = "stop"
 
 
@@ -34,6 +37,7 @@ class AlarmIntent:
     recurrence_weekdays: tuple[int, ...] | None = None
     date: date | None = None
     label: str | None = None
+    next_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,10 +94,44 @@ _TENS: Final[dict[str, int]] = {word: value for word, value in _NUMBERS.items() 
 _WEEKDAY_PATTERN: Final[str] = "(?:" + "|".join(_WEEKDAYS) + ")"
 _TIME_PATTERN: Final[str] = (
     r"(?:(?:halb|viertel nach|viertel vor) (?:\d{1,2}|[a-zäöüß]+)"
-    r"|(?:\d{1,2}|[a-zäöüß]+)(?::\d{2})?\s+uhr)"
+    r"|(?:\d{1,2}|[a-zäöüß]+)(?::\d{2})?(?:\s+uhr)?)"
 )
 _ALARM_PATTERN: Final[str] = r"(?:[a-zäöüß]*wecker)"
-_CREATE_VERB: Final[str] = r"(?:stell(?:e)?|erinnere(?: mich)?)"
+_CREATE_VERB: Final[str] = r"(?:stell(?:e)?|erstelle|erzeuge|erinnere(?: mich)?)"
+_WAKE_VERB: Final[str] = r"(?:weck(?:e)? mich|wecke mich)"
+
+
+_TIME_CODES: Final[frozenset[str]] = frozenset(
+    {"missing_time", "ambiguous_time", "missing_duration_unit", "ambiguous_local_time"}
+)
+_DATE_CODES: Final[frozenset[str]] = frozenset(
+    {"ambiguous_weekday", "conflicting_date_expressions", "conflicting_time_expressions"}
+)
+_SELECTOR_CODES: Final[frozenset[str]] = frozenset({"missing_alarm_selector"})
+
+
+def merge_clarification(original: str, code: str, answer: str) -> str | None:
+    """Turn "Wecker." plus "um sieben" into one complete utterance.
+
+    An open question must be answerable with the missing piece alone; the user
+    should never have to repeat the whole sentence. Returns ``None`` when the
+    answer cannot be merged, so the caller asks again instead of guessing.
+    """
+    reply = " ".join(answer.split())
+    if not reply or len(reply) > 80:
+        return None
+    text = _normalise(original)
+    plain = _normalise(reply)
+    if not plain:
+        return None
+    if code in _TIME_CODES or code in _DATE_CODES:
+        return f"{original} {reply}"
+    if code in _SELECTOR_CODES:
+        single = " " not in plain and len(plain) <= 40
+        if "wecker" in text and single and "wecker" not in plain:
+            return re.sub(r"\b([a-zäöüß]*)wecker\b", rf"{plain}wecker", text, count=1)
+        return f"{original} {reply}"
+    return None
 
 
 class AlarmParser:
@@ -115,11 +153,19 @@ class AlarmParser:
         if _is_stop(text):
             return _ok(AlarmIntent(kind=IntentKind.STOP))
         if _is_list(text):
-            return _ok(AlarmIntent(kind=IntentKind.LIST))
+            return _ok(AlarmIntent(kind=IntentKind.LIST, next_only=_wants_next(text)))
+        if _is_status_question(text):
+            return self._parse_status(text)
         if _has_delete_verb(text) and "wecker" in text:
             return self._parse_delete(text)
+        if _has_update_verb(text) and "wecker" in text:
+            return self._parse_update(text, local_now)
+        if _has_activate_verb(text) and "wecker" in text:
+            return self._parse_activate(text)
         if _has_deactivate_verb(text) and "wecker" in text:
             return self._parse_deactivate(text, local_now)
+        if _is_wake(text):
+            return self._parse_wake(text, local_now)
         if "wecker" in text and (_has_create_verb(text) or _matches_relative_create(text)):
             return self._parse_create(text, local_now)
         return _error("unsupported_utterance")
@@ -129,7 +175,7 @@ class AlarmParser:
         if name in {None, "wecker"}:
             return _clarify("missing_alarm_selector", "Welchen Wecker soll ich löschen?")
         if name != "wecker" and re.fullmatch(
-            rf"(?:lösche|loesche|entferne) den {_ALARM_PATTERN}", text
+            rf"(?:lösche|loesche|entferne) (?:den|meinen) {_ALARM_PATTERN}", text
         ):
             return _ok(AlarmIntent(kind=IntentKind.DELETE, label=name))
         return _error("unsupported_tokens")
@@ -140,16 +186,110 @@ class AlarmParser:
             return _ok(
                 AlarmIntent(kind=IntentKind.DEACTIVATE, date=(now + timedelta(days=1)).date())
             )
-        if name != "wecker" and re.fullmatch(rf"deaktiviere den {_ALARM_PATTERN}", text):
+        if name != "wecker" and re.fullmatch(rf"deaktiviere (?:den|meinen) {_ALARM_PATTERN}", text):
             return _ok(AlarmIntent(kind=IntentKind.DEACTIVATE, label=name))
         if name in {None, "wecker"}:
             return _clarify("missing_alarm_selector", "Welchen Wecker soll ich deaktivieren?")
         return _error("unsupported_tokens")
 
+    def _parse_status(self, text: str) -> ParseResult:
+        name = _alarm_name(text)
+        if name in {None, "wecker"}:
+            return _clarify("missing_alarm_selector", "Welchen Wecker meinst du?")
+        return _ok(AlarmIntent(kind=IntentKind.STATUS, label=name))
+
+    def _parse_activate(self, text: str) -> ParseResult:
+        name = _alarm_name(text)
+        if name in {None, "wecker"}:
+            return _clarify("missing_alarm_selector", "Welchen Wecker soll ich aktivieren?")
+        if not re.fullmatch(
+            rf"(?:aktiviere|schalte) (?:den|meinen) {_ALARM_PATTERN}(?: wieder)?(?: ein)?",
+            text,
+        ):
+            return _error("unsupported_tokens")
+        return _ok(AlarmIntent(kind=IntentKind.ACTIVATE, label=name))
+
+    def _parse_update(self, text: str, now: datetime) -> ParseResult:
+        name = _alarm_name(text)
+        if name in {None, "wecker"}:
+            return _clarify("missing_alarm_selector", "Welchen Wecker soll ich ändern?")
+        if not re.fullmatch(
+            rf"(?:ändere|aendere|verschiebe|stell(?:e)?) (?:den|meinen) {_ALARM_PATTERN}"
+            rf" (?:auf|um) {_TIME_PATTERN}",
+            text,
+        ):
+            return _error("unsupported_tokens")
+        clock_times = _clock_times(text)
+        if len(clock_times) != 1:
+            return _clarify("ambiguous_time", "Auf welche Uhrzeit soll ich ihn ändern?")
+        hour, minute = clock_times[0]
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            return _error("invalid_time")
+        return _ok(
+            AlarmIntent(
+                kind=IntentKind.UPDATE,
+                time_hour=hour,
+                time_minute=minute,
+                label=name,
+            )
+        )
+
+    def _parse_wake(self, text: str, now: datetime) -> ParseResult:
+        """ "Weck mich morgen um acht" carries no alarm word at all."""
+        day = rf"(?:(?P<day>morgen|heute|{_WEEKDAY_PATTERN}) )?"
+        if not re.fullmatch(rf"{_WAKE_VERB} {day}um {_TIME_PATTERN}", text):
+            if re.match(rf"{_WAKE_VERB}\b", text):
+                return _clarify("missing_time", "Wann soll ich dich wecken?")
+            return _error("unsupported_tokens")
+        clock_times = _clock_times(text)
+        if len(clock_times) != 1:
+            return _clarify("ambiguous_time", "Zu welcher Uhrzeit soll ich dich wecken?")
+        hour, minute = clock_times[0]
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            return _error("invalid_time")
+        words = text.split()
+        for word in words:
+            if word in _WEEKDAYS:
+                weekly = AlarmIntent(
+                    kind=IntentKind.CREATE,
+                    time_hour=hour,
+                    time_minute=minute,
+                    recurrence_weekday=_WEEKDAYS[word],
+                )
+                return _ok(weekly)
+        target_date = _target_date(now, text, None, hour, minute)
+        local_time = _local_datetime(target_date, hour, minute, self.timezone)
+        if local_time is None:
+            return _error("nonexistent_local_time")
+        if local_time == "ambiguous":
+            return _clarify(
+                "ambiguous_local_time",
+                "Meinst du die erste oder zweite Uhrzeit nach der Zeitumstellung?",
+            )
+        return _ok(AlarmIntent(kind=IntentKind.CREATE, at=local_time))
+
     def _parse_create(self, text: str, now: datetime) -> ParseResult:
         name = _alarm_name(text)
         if name is None:
             return _error("unsupported_tokens")
+
+        weekday_range = _weekday_range(text)
+        if weekday_range is not None:
+            clock_times = _clock_times(text)
+            if len(clock_times) != 1:
+                return _clarify("ambiguous_time", "Zu welcher Uhrzeit soll der Wecker klingeln?")
+            hour, minute = clock_times[0]
+            if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+                return _error("invalid_time")
+            return _ok(
+                AlarmIntent(
+                    kind=IntentKind.CREATE,
+                    time_hour=hour,
+                    time_minute=minute,
+                    recurrence_weekdays=weekday_range,
+                    label=_label(name),
+                )
+            )
 
         weekdays = _weekday_mentions(text)
         if "morgen" in text and weekdays:
@@ -242,15 +382,75 @@ def _error(code: str) -> ParseResult:
 
 
 def _normalise(text: str) -> str:
-    return " ".join(re.sub(r"[?!.,]", " ", text.casefold()).split())
+    joined = re.sub(r"(\w)-(wecker)\b", r"\1\2", text.casefold())
+    return " ".join(re.sub(r"[?!.,]", " ", joined).split())
+
+
+_STOP_PHRASES: Final[frozenset[str]] = frozenset(
+    {
+        "stopp den wecker",
+        "stop den wecker",
+        "stoppe den wecker",
+        "nabu stopp",
+        "nabu stop",
+        "wecker aus",
+        "hör auf zu klingeln",
+        "hoer auf zu klingeln",
+        "stopp",
+        "stop",
+    }
+)
+
+_LIST_PHRASES: Final[frozenset[str]] = frozenset(
+    {
+        "welche wecker habe ich",
+        "welche wecker habe ich noch",
+        "welche wecker sind aktiv",
+        "zeige mir meine wecker",
+        "zeig mir meine wecker",
+        "liste meine wecker",
+        "liste alle wecker",
+    }
+)
 
 
 def _is_stop(text: str) -> bool:
-    return bool(re.fullmatch(r"(?:stopp|stop) den wecker", text))
+    return text in _STOP_PHRASES
 
 
 def _is_list(text: str) -> bool:
-    return text == "welche wecker habe ich"
+    return text in _LIST_PHRASES or _wants_next(text)
+
+
+def _wants_next(text: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:wann klingelt |wann kommt )(?:mein |der )?"
+            r"(?:nächste|naechste|nächster|naechster) wecker",
+            text,
+        )
+    )
+
+
+def _is_status_question(text: str) -> bool:
+    return bool(
+        re.fullmatch(
+            rf"ist (?:mein|der|die) {_ALARM_PATTERN} (?:aktiviert|aktiv|an|eingeschaltet)",
+            text,
+        )
+    )
+
+
+def _has_update_verb(text: str) -> bool:
+    return bool(re.search(r"\b(?:ändere|aendere|verschiebe)\b", text))
+
+
+def _has_activate_verb(text: str) -> bool:
+    return bool(re.search(r"\b(?:aktiviere|schalte)\b", text))
+
+
+def _is_wake(text: str) -> bool:
+    return bool(re.match(rf"{_WAKE_VERB}\b", text))
 
 
 def _has_delete_verb(text: str) -> bool:
@@ -262,11 +462,14 @@ def _has_deactivate_verb(text: str) -> bool:
 
 
 def _has_create_verb(text: str) -> bool:
-    return bool(re.search(r"\b(?:stell|stelle|erinnere)\b", text))
+    return bool(re.search(rf"\b{_CREATE_VERB}\b", text))
 
 
 def _alarm_name(text: str) -> str | None:
     """Return the spoken alarm word, e.g. ``medikamentenwecker`` or ``wecker``."""
+    explicit = re.search(r"\b(?:namens|namen)\s+([a-zäöüß]+)", text)
+    if explicit:
+        return explicit.group(1)
     words = re.findall(r"\b[\wäöüß]*wecker\b", text)
     if not words:
         return None
@@ -314,9 +517,10 @@ def _clock_times(text: str) -> list[tuple[int, int]]:
     """Extract clock times including the common German spoken forms."""
     values: list[tuple[int, int]] = []
     for match in re.finditer(
-        r"\bum\s+(?:halb\s+(\d{1,2}|[a-zäöüß]+)"
+        r"\b(?:um|auf|für|fuer)\s+(?:halb\s+(\d{1,2}|[a-zäöüß]+)"
         r"|viertel\s+(nach|vor)\s+(\d{1,2}|[a-zäöüß]+)"
-        r"|(\d{1,2}|[a-zäöüß]+)(?::(\d{2}))?\s*uhr)\b",
+        r"|(\d{1,2}|[a-zäöüß]+)(?::(\d{2}))?(?:\s*uhr)?)\b"
+        r"|\b(\d{1,2})(?::(\d{2}))\s*uhr\b",
         text,
     ):
         if match.group(1):
@@ -327,11 +531,27 @@ def _clock_times(text: str) -> list[tuple[int, int]]:
             hour = _parse_number(match.group(3))
             if hour is not None:
                 values.append((hour, 15 if match.group(2) == "nach" else 45))
-        else:
+        elif match.group(4):
             hour = _parse_number(match.group(4))
             if hour is not None:
                 values.append((hour, int(match.group(5) or 0)))
+        else:
+            hour = _parse_number(match.group(6))
+            if hour is not None:
+                values.append((hour, int(match.group(7) or 0)))
     return values
+
+
+def _weekday_range(text: str) -> tuple[int, ...] | None:
+    """ "Montag bis Freitag" is a range, not an enumeration."""
+    match = re.search(rf"\b({_WEEKDAY_PATTERN})\s+bis\s+({_WEEKDAY_PATTERN})\b", text)
+    if match is None:
+        return None
+    start = _WEEKDAYS[match.group(1)]
+    end = _WEEKDAYS[match.group(2)]
+    if start <= end:
+        return tuple(range(start, end + 1))
+    return tuple(range(start, 7)) + tuple(range(0, end + 1))
 
 
 def _weekday_mentions(text: str) -> list[int]:
@@ -388,7 +608,11 @@ def _matches_one_time_create(text: str) -> bool:
     return bool(
         re.fullmatch(
             rf"{_CREATE_VERB} (?:mir )?(?:(?:morgen|{_WEEKDAY_PATTERN}) )?"
-            rf"um {_TIME_PATTERN} einen {_ALARM_PATTERN}",
+            rf"(?:(?:um|auf|für|fuer) {_TIME_PATTERN})? {_ALARM_PATTERN}"
+            rf"|{_CREATE_VERB} (?:mir )?(?:(?:morgen|{_WEEKDAY_PATTERN}) )?"
+            rf"(?:um|auf|für|fuer) {_TIME_PATTERN} (?:einen )?{_ALARM_PATTERN}"
+            rf"|{_CREATE_VERB} (?:mir )?(?:einen )?{_ALARM_PATTERN}"
+            rf"(?: namens [a-zäöüß]+)? (?:für|fuer|auf|um) {_TIME_PATTERN}",
             text,
         )
     )
