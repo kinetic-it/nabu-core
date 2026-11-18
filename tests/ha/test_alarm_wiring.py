@@ -7,9 +7,13 @@ from custom_components.kinetic_voice_router import (
 from custom_components.kinetic_voice_router.alarm_bridge import (
     ALARM_DOMAIN,
     CONF_ALARM_DB,
+    CONF_ALARM_RING_SECONDS,
     CONF_ALARM_TARGETS,
     SERVICE_FIELDS,
 )
+
+# the integration uses its bundled copy, so patch exactly that class
+from custom_components.kinetic_voice_router.nabu_core.player import MediaPlayerAdapter
 
 
 class FakeConfig:
@@ -21,20 +25,33 @@ class FakeConfig:
         return str(self._root / name)
 
 
-class FakeState:
-    def __init__(self, state):
-        self.state = state
+class FakeStates:
+    def __init__(self):
+        self._states = {}
+
+    def get(self, entity_id):
+        return self._states.get(entity_id)
+
+    def async_all(self, domain=None):
+        return [
+            state
+            for entity_id, state in self._states.items()
+            if domain is None or entity_id.startswith(f"{domain}.")
+        ]
 
 
 class WiringHass:
-    def __init__(self, root):
-        self.services = FakeServices()
-        self.data = {}
-        self.config = FakeConfig(root)
-        self.states = self
+    """The smallest object the alarm wiring needs."""
 
-    def get(self, entity_id):
-        return FakeState("idle")
+    def __init__(self, root):
+        self.config = FakeConfig(root)
+        self.services = FakeServices()
+        self.states = FakeStates()
+        self.data = {}
+        self.loop = None
+
+    async def async_add_executor_job(self, func, *args):
+        return func(*args)
 
 
 class FakeServices:
@@ -42,7 +59,7 @@ class FakeServices:
         self.registered = {}
         self.removed = []
 
-    def async_register(self, domain, name, handler, schema=None):
+    def async_register(self, domain, name, handler, schema=None, **kwargs):
         self.registered[(domain, name)] = handler
 
     def async_remove(self, domain, name):
@@ -93,3 +110,33 @@ async def test_enabled_configuration_registers_every_service(tmp_path):
     registry = hass.data[ALARM_REGISTRY_KEY]
     registry.unregister(hass)
     assert hass.services.registered == {}
+
+
+@pytest.mark.asyncio
+async def test_adapter_repeats_the_sound_until_stopped(tmp_path, monkeypatch):
+    """A short audio file must not end the ring: the adapter re-arms it.
+
+    Without this the alarm played for as long as the media file (two seconds in
+    the pilot) and a later stop had nothing left to stop.
+    """
+    captured = {}
+    original = MediaPlayerAdapter.__init__
+
+    def spy(self, *args, **kwargs):
+        captured.update(kwargs)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(MediaPlayerAdapter, "__init__", spy)
+    hass = WiringHass(tmp_path)
+    entry = FakeEntry(
+        {
+            CONF_ALARM_DB: "alarms.sqlite",
+            CONF_ALARM_TARGETS: ["media_player.wohnzimmer"],
+            CONF_ALARM_RING_SECONDS: 45,
+        }
+    )
+
+    await _async_setup_alarm_services(hass, entry)
+
+    assert captured["repeat"] is True
+    assert captured["max_seconds"] == 45.0

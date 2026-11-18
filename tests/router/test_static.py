@@ -59,18 +59,45 @@ def _placeholders(text: str) -> set[str]:
 class ActionPathGuards(unittest.TestCase):
     def test_no_action_path_anywhere(self):
         for path in KVR.rglob("*.py"):
+            if "nabu_core" in path.parts:
+                # The vendored alarm package is the one deliberate output path; it
+                # is guarded separately below and only active on opt-in.
+                continue
             source = path.read_text(encoding="utf-8")
             for needle, why in FORBIDDEN_CALLS.items():
                 with self.subTest(file=str(path.relative_to(ROOT)), needle=needle):
                     self.assertNotIn(needle, source, why)
 
+    def test_alarm_package_talks_only_through_the_media_adapter(self):
+        """The alarm output path must stay in one place and stay allowlisted."""
+        allowed = {"ha_media.py"}
+        for path in (KVR / "nabu_core").rglob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            for needle, why in FORBIDDEN_CALLS.items():
+                if needle == "services.async_call" and path.name in allowed:
+                    continue
+                with self.subTest(file=path.name, needle=needle):
+                    self.assertNotIn(needle, source, why)
+        # the one file that may call services must not do anything else
+        media = (KVR / "nabu_core" / "ha_media.py").read_text(encoding="utf-8")
+        for needle in FORBIDDEN_CALLS:
+            if needle != "services.async_call":
+                with self.subTest(needle=needle):
+                    self.assertNotIn(needle, media)
+
     def test_only_the_hermes_client_uses_the_network(self):
+        network_files = {"hermes_client.py", "remote_ha.py", "mcp_ha.py"}
         for path in KVR.rglob("*.py"):
             imports = {name.split(".")[0] for name in _imports(path)}
             with self.subTest(file=path.name):
+                if path.name in network_files:
+                    # hermes_client.py is the router's only outbound path;
+                    # remote_ha.py and mcp_ha.py are the optional diagnostic
+                    # clients for driving a speaker from a workstation.
+                    self.assertNotIn("subprocess", imports)
+                    continue
                 self.assertFalse(imports & FORBIDDEN_IMPORTS, imports & FORBIDDEN_IMPORTS)
-                if path.name != "hermes_client.py":
-                    self.assertNotIn("aiohttp", imports)
+                self.assertNotIn("aiohttp", imports)
 
     def test_router_core_is_pure(self):
         for path in (KVR / "voice_router").glob("*.py"):
@@ -164,10 +191,24 @@ class ManifestAndPackaging(unittest.TestCase):
         self.assertNotIn("zip_release", hacs)  # no artifact is promised before a release exists
 
     def test_exactly_one_integration(self):
+        directories = sorted(p.name for p in (ROOT / "custom_components").iterdir() if p.is_dir())
+        self.assertEqual(directories, ["kinetic_voice_router", "nabu_core"])
+
+    def test_the_second_integration_carries_no_logic(self):
+        """`nabu_core` only describes services; the code lives in the router."""
+        folder = ROOT / "custom_components" / "nabu_core"
         self.assertEqual(
-            [p.name for p in (ROOT / "custom_components").iterdir() if p.is_dir()],
-            ["kinetic_voice_router"],
+            sorted(p.name for p in folder.iterdir() if p.is_file()),
+            ["__init__.py", "manifest.json", "services.yaml"],
         )
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["domain"], "nabu_core")
+        self.assertNotIn("config_flow", manifest)
+        self.assertNotIn("dependencies", manifest)
+        self.assertNotIn("requirements", manifest)
+        definition = (folder / "__init__.py").read_text(encoding="utf-8")
+        self.assertNotIn("services.async_call", definition)
+        self.assertNotIn("async_register", definition)
 
     def test_licence_and_notice(self):
         licence = (ROOT / "LICENSE").read_text(encoding="utf-8")

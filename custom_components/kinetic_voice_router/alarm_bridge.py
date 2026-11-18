@@ -21,7 +21,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from nabu_core.ha_services import AlarmServiceLayer, ServiceResult
+from .nabu_core.ha_services import AlarmServiceLayer, ServiceResult
 
 try:  # Home Assistant is optional here: the offline laboratory imports this module.
     from homeassistant.core import SupportsResponse
@@ -128,13 +128,13 @@ def build_alarm_layer(hass, options: Mapping[str, Any]):
     if not db_path:
         return None
 
-    from nabu_core.alarm_engine import AlarmStore
-    from nabu_core.devices import DevicePolicy
-    from nabu_core.dispatch import SerialDispatcher
-    from nabu_core.ha_media import HomeAssistantMediaClient
-    from nabu_core.ha_services import AlarmServiceLayer
-    from nabu_core.player import MediaPlayerAdapter
-    from nabu_core.scheduler import Scheduler
+    from .nabu_core.alarm_engine import AlarmStore
+    from .nabu_core.devices import DevicePolicy
+    from .nabu_core.dispatch import SerialDispatcher
+    from .nabu_core.ha_media import HomeAssistantMediaClient
+    from .nabu_core.ha_services import AlarmServiceLayer
+    from .nabu_core.player import MediaPlayerAdapter
+    from .nabu_core.scheduler import Scheduler
 
     allowed = tuple(options.get(CONF_ALARM_TARGETS, ()) or ())
     denied = tuple(options.get(CONF_ALARM_DENIED, ()) or ())
@@ -145,13 +145,19 @@ def build_alarm_layer(hass, options: Mapping[str, Any]):
     policy = DevicePolicy(allowed=allowed, denied=denied)
     media_id = options.get(CONF_ALARM_MEDIA, "alarm.wav")
     media_type = options.get(CONF_ALARM_MEDIA_TYPE, "music")
+    ring_seconds = float(options.get(CONF_ALARM_RING_SECONDS, 120))
     adapter = MediaPlayerAdapter(
         HomeAssistantMediaClient(hass, media_id, media_type),
         policy,
         media=(media_type, media_id),
-        max_seconds=float(options.get(CONF_ALARM_RING_SECONDS, 120)),
+        max_seconds=ring_seconds,
+        # An alarm has to keep ringing until somebody stops it: the configured
+        # media file may be shorter than the ring phase.
+        repeat=True,
     )
-    dispatcher = SerialDispatcher(adapter, allowed_targets=set(allowed), max_seconds=120)
+    dispatcher = SerialDispatcher(
+        adapter, allowed_targets=set(allowed), max_seconds=ring_seconds + 10
+    )
     scheduler = Scheduler(store, dispatcher, allowed[0])
     layer = AlarmServiceLayer(
         store, stop_callback=lambda: scheduler.stop(datetime.now(UTC)), scheduler=scheduler

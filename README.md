@@ -53,6 +53,17 @@ real-device playback. No Echo device, no speaker and no production Home Assistan
 
 ## Installation
 
+The integration carries its own copy of the engine. Build it before copying the
+folder into `config/custom_components`, otherwise Home Assistant cannot import
+`nabu_core`:
+
+```bash
+python3 scripts/bundle_integration.py          # writes kinetic_voice_router/nabu_core
+python3 scripts/bundle_integration.py --check  # verifies it is up to date
+```
+
+The generated folder is not versioned; the script is the reproducible step.
+
 Nabu Core is not on HACS yet. Two options:
 
 1. Copy `custom_components/kinetic_voice_router` into your Home Assistant `config/custom_components`
