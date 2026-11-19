@@ -15,11 +15,13 @@ class FakeMediaClient:
         self.states = list(states or [])
         self.fail = fail or set()
         self.calls = []
+        self.media_id = None          # what Home Assistant reports as media_content_id
 
     async def play_media(self, entity_id, media):
         self.calls.append(("play_media", entity_id))
         if "play" in self.fail:
             raise ConnectionError("play failed")
+        self.media_id = media[1]
         if self.states:
             self.state = self.states.pop(0)
 
@@ -27,6 +29,7 @@ class FakeMediaClient:
         self.calls.append(("stop", entity_id))
         if "stop" in self.fail:
             raise ConnectionError("stop failed")
+        self.media_id = None
         if self.states:
             self.state = self.states.pop(0)
 
@@ -35,6 +38,12 @@ class FakeMediaClient:
         if "state" in self.fail:
             raise ConnectionError("state unreadable")
         return self.state
+
+    async def get_media_id(self, entity_id):
+        self.calls.append(("get_media_id", entity_id))
+        if "media" in self.fail:
+            raise ConnectionError("media id unreadable")
+        return self.media_id
 
 
 def policy(**kwargs):

@@ -23,12 +23,14 @@ class PlayerClient:
         self.fail_stop = False
         self.ignore_mute = False
         self.playing = asyncio.Event()
+        self.media_id = None          # Home Assistant reports media_content_id
 
     async def play_media(self, target, media):
         assert target == TARGET
         self.plays += 1
         if self.fail_play:
             raise OSError("play refused")
+        self.media_id = media[1]
         self.state = "playing"
         self.playing.set()
 
@@ -38,11 +40,16 @@ class PlayerClient:
         if self.fail_stop:
             raise OSError("stop refused")
         if self.state == "playing":
+            self.media_id = None
             self.state = "idle"
 
     async def get_state(self, target):
         assert target == TARGET
         return self.state
+
+    async def get_media_id(self, target):
+        assert target == TARGET
+        return self.media_id
 
     async def get_volume(self, target):
         assert target == TARGET
@@ -300,14 +307,27 @@ async def test_play_service_error_after_start_still_stops_owned_alarm():
     assert client.volume == 0.5
 
 
+class NoIdentityClient:
+    """A player that reports state and volume but no media identifier at all."""
+
+    def __init__(self):
+        self._inner = PlayerClient()
+
+    def __getattr__(self, name):
+        if name == "get_media_id":
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+
 async def test_missing_media_identity_must_not_stop_foreign_playback():
-    client = PlayerClient()  # media identifier is not exposed by this player
+    client = NoIdentityClient()  # media identifier is not exposed by this player
     player = adapter(client, volume=0.3)
     task = asyncio.create_task(player.play(TARGET))
     await asyncio.wait_for(client.playing.wait(), 1)
     # Another actor may have replaced the alarm without observable identity.
     result = await player.stop(TARGET)
     assert result.status is not PlaybackStatus.STOPPED_CONFIRMED
+    assert result.detail == "media_identity_unavailable"
     await task
     assert client.stops == 0
 

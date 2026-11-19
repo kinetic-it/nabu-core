@@ -204,10 +204,16 @@ class MediaPlayerAdapter:
             0.0 if expected == 0 else VOLUME_TOLERANCE
         )
 
-    async def _identify_media(self, ring: _Ring) -> bool:
+    async def _identify_media(self, ring: _Ring) -> bool | None:
+        """Does the player still report our alarm? None when it cannot say.
+
+        A player that exposes no media identifier leaves ownership unproven. That is
+        not the same as "it is ours": stopping on a guess can silence somebody else's
+        music, so callers must treat None as a refusal, not as consent.
+        """
         reader = getattr(self._client, "get_media_id", None)
         if reader is None:
-            return True
+            return None
         async with asyncio.timeout(IO_TIMEOUT):
             observed = await reader(ring.target)
         if observed is not None:
@@ -319,7 +325,14 @@ class MediaPlayerAdapter:
         result = PlaybackOutcome(PlaybackStatus.STOP_UNCONFIRMED, ring.target, "no_playback")
         async with self._media_lock:
             try:
-                if not await self._identify_media(ring):
+                owned = await self._identify_media(ring)
+                if owned is None:
+                    # Unobservable identity is a refusal, not a licence to stop: the
+                    # playing content may be somebody else's.
+                    return PlaybackOutcome(
+                        PlaybackStatus.STOP_UNCONFIRMED, ring.target, "media_identity_unavailable"
+                    )
+                if not owned:
                     return PlaybackOutcome(
                         PlaybackStatus.STOP_UNCONFIRMED, ring.target, "media_replaced"
                     )
@@ -406,7 +419,12 @@ class MediaPlayerAdapter:
             try:
                 if await self._state(target) not in PLAYING_STATES | {"idle"}:
                     return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target, "not_available")
-                if not await self._identify_media(ring):
+                owned = await self._identify_media(ring)
+                if owned is None:
+                    return PlaybackOutcome(
+                        PlaybackStatus.DUCK_FAILED, target, "media_identity_unavailable"
+                    )
+                if not owned:
                     return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target, "media_replaced")
                 # Remember a mute attempt even if observation fails: no proof of
                 # ducking is not proof that the player stayed at the previous level.
@@ -431,7 +449,9 @@ class MediaPlayerAdapter:
         observed = await self.confirm_playing(ring.target, wait=self._start_timeout, interval=0.05)
         if observed.status is not PlaybackStatus.PLAYING_CONFIRMED:
             raise RuntimeError(f"playback not confirmed: {observed.detail}")
-        if not await self._identify_media(ring):
+        # At start, unknown identity is expected (a player may expose none); only a
+        # positive mismatch is a failure. Stop and duck refuse unknown identity later.
+        if await self._identify_media(ring) is False:
             raise RuntimeError("alarm media replaced")
 
     async def play(self, entity_id: str) -> PlaybackOutcome:
