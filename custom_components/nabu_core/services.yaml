@@ -1,0 +1,198 @@
+# Service descriptions for the Nabu Core alarm domain.
+#
+# The services themselves are registered by the kinetic_voice_router integration
+# as soon as the ``alarm_db`` option is set. This file only describes them, so the
+# Home Assistant UI can render the service fields and the loader does not complain
+# about an unknown integration. It registers nothing and stores no state.
+
+alarm_create:
+  name: Create alarm
+  description: Create an alarm in one of the ten stable slots.
+  fields:
+    name:
+      name: Name
+      description: Optional spoken name. Must be unique.
+      example: Wecker
+      selector:
+        text:
+    when:
+      name: When
+      description: Absolute local time, ISO 8601.
+      example: "2026-11-19T06:30:00+01:00"
+      selector:
+        text:
+    in_minutes:
+      name: In minutes
+      description: Relative time from now, in minutes.
+      example: 2
+      selector:
+        number:
+          min: 1
+          max: 10080
+          unit_of_measurement: min
+    weekdays:
+      name: Weekdays
+      description: Weekdays for a weekly series (mon, tue, wed, thu, fri, sat, sun).
+      selector:
+        text:
+    catchup_seconds:
+      name: Catch-up window
+      description: How late the alarm may still ring. 0 disables catching up.
+      example: 300
+      selector:
+        number:
+          min: 0
+          max: 86400
+          unit_of_measurement: s
+    catchup_enabled:
+      name: Catch-up enabled
+      selector:
+        boolean:
+
+alarm_update:
+  name: Update alarm
+  description: Change an existing alarm.
+  fields:
+    id:
+      name: Alarm
+      description: Stable slot id, for example alarm-01.
+      example: alarm-01
+      required: true
+      selector:
+        text:
+    name:
+      name: Name
+      selector:
+        text:
+    when:
+      name: When
+      selector:
+        text:
+    in_minutes:
+      name: In minutes
+      selector:
+        number:
+          min: 1
+          max: 10080
+          unit_of_measurement: min
+    weekdays:
+      name: Weekdays
+      selector:
+        text:
+    catchup_seconds:
+      name: Catch-up window
+      selector:
+        number:
+          min: 0
+          max: 86400
+          unit_of_measurement: s
+    catchup_enabled:
+      name: Catch-up enabled
+      selector:
+        boolean:
+
+alarm_enable:
+  name: Enable alarm
+  description: Activate an existing alarm.
+  fields:
+    id:
+      name: Alarm
+      required: true
+      example: alarm-01
+      selector:
+        text:
+
+alarm_disable:
+  name: Disable alarm
+  description: Deactivate an alarm without deleting it.
+  fields:
+    id:
+      name: Alarm
+      required: true
+      example: alarm-01
+      selector:
+        text:
+
+alarm_delete:
+  name: Delete alarm
+  description: Remove an alarm and free its slot.
+  fields:
+    id:
+      name: Alarm
+      required: true
+      example: alarm-01
+      selector:
+        text:
+
+alarm_list:
+  name: List alarms
+  description: List all alarms with their next due time.
+
+alarm_status:
+  name: Alarm status
+  description: Report the scheduler journal and the last known playback states.
+
+alarm_stop:
+  name: Stop ringing
+  description: Request a stop. A confirmation only means the player stopped reporting playback, never that silence was proven.
+
+alarm_ring:
+  name: Run one scheduler tick
+  description: Run a single scheduler pass immediately. Also used by tests.
+  fields:
+    now:
+      name: Now
+      description: Optional ISO 8601 override for the tick time.
+      selector:
+        text:
+
+alarm_configure_catch_up:
+  name: Configure catch-up
+  description: Set the catch-up window for one alarm.
+  fields:
+    id:
+      name: Alarm
+      required: true
+      example: alarm-01
+      selector:
+        text:
+    catchup_seconds:
+      name: Catch-up window
+      selector:
+        number:
+          min: 0
+          max: 86400
+          unit_of_measurement: s
+    catchup_enabled:
+      name: Catch-up enabled
+      selector:
+        boolean:
+
+alarm_utterance:
+  name: Handle a spoken alarm sentence
+  description: >-
+    Parse one German sentence with the same rules the conversation router uses and
+    execute the resulting alarm command. Intended for a sentence trigger, which
+    Home Assistant evaluates before its own local intents.
+  fields:
+    text:
+      name: Sentence
+      description: The recognised sentence, for example "Erstelle einen Wecker namens Pilot in 2 Minuten".
+      required: true
+      example: Erstelle einen Wecker namens Pilot in 2 Minuten
+      selector:
+        text:
+
+alarm_duck:
+  name: Duck current alarm
+  description: Temporarily lower the active alarm to zero; does not stop the alarm.
+  fields:
+    seconds:
+      name: Seconds
+      description: Duration of the confirmed quiet window.
+      default: 12
+      selector:
+        number:
+          min: 1
+          max: 120
+          unit_of_measurement: s

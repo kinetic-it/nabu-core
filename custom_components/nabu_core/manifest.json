@@ -1,0 +1,9 @@
+{
+  "domain": "nabu_core",
+  "name": "Nabu Core Alarm Services",
+  "codeowners": ["@kinetic-it"],
+  "documentation": "https://github.com/kinetic-it/nabu-core",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "version": "0.1.0"
+}
