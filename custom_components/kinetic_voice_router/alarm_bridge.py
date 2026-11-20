@@ -71,6 +71,10 @@ CATCH_UP_DEFAULT_SECONDS = 300
 #: nothing is registered, so existing installations are unaffected.
 CONF_ALARM_DB = "alarm_db"
 CONF_ALARM_TARGETS = "alarm_targets"
+CONF_ALARM_SATELLITE = "alarm_satellite"
+#: Optional: the media player whose pre-alarm music the session may pause and
+#: restore. Only this entity may be started while it reports ``paused``.
+CONF_ALARM_MUSIC = "alarm_music_entity"
 CONF_ALARM_DENIED = "alarm_denied"
 CONF_ALARM_MEDIA = "alarm_media"
 CONF_ALARM_MEDIA_TYPE = "alarm_media_type"
@@ -92,9 +96,10 @@ DEFAULT_TICK_SECONDS = 20
 class AlarmServiceRegistry:
     """Registers the alarm services against a Home Assistant-like registry."""
 
-    def __init__(self, layer: AlarmServiceLayer) -> None:
+    def __init__(self, layer: AlarmServiceLayer, assist_gate=None) -> None:
         self.layer = layer
         self.registered: dict[str, Any] = {}
+        self.assist_gate = assist_gate
 
     def _build(self, name: str):
         method = getattr(self.layer, name)
@@ -109,6 +114,8 @@ class AlarmServiceRegistry:
 
     def register(self, hass) -> dict[str, Any]:
         """Register every alarm service exactly once and return the handlers."""
+        if self.assist_gate is not None:
+            self.assist_gate.register()
         services = hass.services
         for name in SERVICE_FIELDS:
             if name in self.registered:
@@ -124,6 +131,8 @@ class AlarmServiceRegistry:
         return self.registered
 
     def unregister(self, hass) -> None:
+        if self.assist_gate is not None:
+            self.assist_gate.unregister()
         for name in list(self.registered):
             hass.services.async_remove(ALARM_DOMAIN, f"alarm_{name}")
             del self.registered[name]
@@ -140,10 +149,12 @@ def build_alarm_layer(hass, options: Mapping[str, Any]):
         return None
 
     from .nabu_core.alarm_engine import AlarmStore
+    from .nabu_core.alarm_session import AlarmSession
     from .nabu_core.devices import DevicePolicy
     from .nabu_core.dispatch import SerialDispatcher
     from .nabu_core.ha_media import HomeAssistantMediaClient
     from .nabu_core.ha_services import AlarmServiceLayer
+    from .nabu_core.music import HaMusicController
     from .nabu_core.player import MediaPlayerAdapter
     from .nabu_core.scheduler import Scheduler
 
@@ -159,29 +170,86 @@ def build_alarm_layer(hass, options: Mapping[str, Any]):
     pilot = str(options.get(CONF_ALARM_PILOT) or "").strip()
     pilot_filter = _pilot_filter(pilot) if pilot else None
     ring_seconds = float(options.get(CONF_ALARM_RING_SECONDS, 120))
+    media_client = HomeAssistantMediaClient(hass, media_id, media_type)
+    satellite = options.get(CONF_ALARM_SATELLITE)
+    music_entity = str(options.get(CONF_ALARM_MUSIC) or "").strip().lower()
+    if music_entity and music_entity not in allowed:
+        raise ValueError("alarm music entity must be one of the allowlisted targets")
+    music = HaMusicController(media_client, entity_id=music_entity) if music_entity else None
     adapter = MediaPlayerAdapter(
-        HomeAssistantMediaClient(hass, media_id, media_type),
+        media_client,
         policy,
         recovery_store=store,
         media=(media_type, media_id),
         max_seconds=ring_seconds,
         # An alarm has to keep ringing until somebody stops it: the configured
         # media file may be shorter than the ring phase.
-        repeat=True,
+        repeat=not bool(satellite),
         volume=None
         if options.get(CONF_ALARM_VOLUME) in (None, "")
         else float(options[CONF_ALARM_VOLUME]),
         cycle_on=float(options.get(CONF_ALARM_CYCLE_ON, 0)),
         cycle_off=float(options.get(CONF_ALARM_CYCLE_OFF, 0)),
+        allow_paused=music is not None,
     )
     dispatcher = SerialDispatcher(
         adapter, allowed_targets=set(allowed), max_seconds=ring_seconds + 10
     )
-    scheduler = Scheduler(store, dispatcher, allowed[0], alarm_filter=pilot_filter)
+    if satellite and (
+        not isinstance(satellite, str) or not satellite.startswith("assist_satellite.")
+    ):
+        raise ValueError("alarm satellite must be an assist_satellite entity")
+    from .assist_gate import AssistGate
+
+    gate = AssistGate(hass, satellite) if satellite else None
+
+    async def interaction_active():
+        if gate is None:
+            raise RuntimeError("satellite not configured")
+        return await gate.interaction_active()
+
+    async def recovery_check(target):
+        return (
+            str(await media_client.get_state(target)).lower() in {"idle", "off", "standby"}
+            and await interaction_active() is False
+        )
+
+    def session_factory(target):
+        async def guarded_ring():
+            from .nabu_core.dispatch import DispatchResult
+
+            state = str(await media_client.get_state(target)).lower()
+            safe = {"idle", "off", "standby"}
+            if music is not None and target == music_entity:
+                safe = safe | {"paused"}
+            if state not in safe:
+                return DispatchResult("blocked", "player_not_idle")
+            return await dispatcher.ring(target)
+
+        return AlarmSession(
+            ring=guarded_ring,
+            stop=dispatcher.stop,
+            state_of=lambda: media_client.get_state(target),
+            interaction_active=interaction_active,
+            music=music,
+            ring_seconds=ring_seconds,
+            max_restarts=60,
+            restart_delay=2.0,
+        )
+
+    scheduler = Scheduler(
+        store,
+        dispatcher,
+        allowed[0],
+        alarm_filter=pilot_filter,
+        session_factory=session_factory if satellite else None,
+        session_max_seconds=ring_seconds,
+        recovery_check=recovery_check if satellite else None,
+    )
     layer = AlarmServiceLayer(
         store, stop_callback=lambda: scheduler.stop(datetime.now(UTC)), scheduler=scheduler
     )
-    return layer, AlarmServiceRegistry(layer)
+    return layer, AlarmServiceRegistry(layer, gate)
 
 
 def _pilot_key(name: str) -> str:

@@ -24,7 +24,7 @@ import asyncio
 import errno
 import os
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -35,6 +35,7 @@ except ImportError:  # pragma: no cover - unavailable on the supported Linux hos
     fcntl = None
 
 from .alarm_engine import DEFAULT_CATCHUP_SECONDS, Alarm, AlarmNotFoundError, AlarmStore
+from .alarm_session import AlarmSession, SessionOutcome
 from .dispatch import DispatchResult, SerialDispatcher
 from .player import PlaybackOutcome
 from .recurrence import InvalidLocalOccurrence, next_weekly
@@ -82,9 +83,14 @@ class Scheduler:
         *,
         max_catchup: timedelta = timedelta(seconds=DEFAULT_CATCHUP_SECONDS),
         alarm_filter: Callable[[Alarm], bool] | None = None,
+        session_factory: Callable[[str], AlarmSession] | None = None,
+        session_max_seconds: float = 600.0,
+        recovery_check: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         if not isinstance(max_catchup, timedelta) or max_catchup < timedelta(0):
             raise ValueError("max_catchup must be a non-negative timedelta")
+        if not 0 < session_max_seconds <= 3600:
+            raise ValueError("session_max_seconds must be between 0 and 3600")
         self.store = store
         self.dispatcher = dispatcher
         self.target = target
@@ -93,6 +99,11 @@ class Scheduler:
         # alarms outside the filter stay untouched and unclaimed, so switching
         # the pilot off restores the full set without any migration.
         self.alarm_filter = alarm_filter
+        self.session_factory = session_factory
+        self.session_max_seconds = session_max_seconds
+        self.recovery_check = recovery_check
+        self._active_session: AlarmSession | None = None
+        self._session_done: asyncio.Future[bool] | None = None
         self.diagnostics: list[tuple[str, str]] = []
         self._owner_id = str(uuid4())
         self._lock_path = store.path.with_name(f"{store.path.name}.scheduler.lock")
@@ -170,6 +181,18 @@ class Scheduler:
     def _current_epoch(self) -> int:
         return self.store._run_read(self._epoch)
 
+    async def _watch_session_epoch(self, session: AlarmSession, epoch: int) -> None:
+        """A stop in another scheduler process fences this live session too."""
+        while True:
+            try:
+                if self._current_epoch() != epoch:
+                    await session.request_stop()
+                    return
+            except Exception:
+                await session.request_stop()
+                return
+            await asyncio.sleep(min(session.poll, 0.5))
+
     def occurrences(self) -> list[Occurrence]:
         """Return every persisted occurrence, including interrupted and failed rows."""
         rows = self.store._run_read(
@@ -189,20 +212,101 @@ class Scheduler:
         finally:
             self._release_execution_lock(lock_fd)
 
-    def _recover_locked(self) -> int:
+    def _recover_locked(
+        self,
+        *,
+        preserve_owner: bool = False,
+        preserve_pending: bool = False,
+        now: datetime | None = None,
+    ) -> int:
         """A claim left while we own the tick lock has no living executor."""
         finished = datetime.now(UTC).isoformat()
 
         def action(db: sqlite3.Connection) -> int:
-            cursor = db.execute(
-                "UPDATE alarm_occurrences "
-                "SET status='interrupted', detail='interrupted_after_restart', "
-                "claimed_by=NULL, finished_at=? WHERE status='in_flight'",
-                (finished,),
-            )
-            return cursor.rowcount
+            protected: set[str] = set()
+            if preserve_pending:
+                rows = db.execute(
+                    "SELECT occurrence_id FROM alarm_sessions WHERE phase IN "
+                    "('active','snoozed') AND target=? AND stop_epoch=? AND deadline>?",
+                    (self.target, self._epoch(db), (now or datetime.now(UTC)).isoformat()),
+                ).fetchall()
+                protected = {row["occurrence_id"] for row in rows}
+            stale = [
+                row["occurrence_id"]
+                for row in db.execute(
+                    "SELECT occurrence_id, claimed_by FROM alarm_occurrences "
+                    "WHERE status='in_flight'"
+                ).fetchall()
+                if row["occurrence_id"] not in protected
+                and (not preserve_owner or row["claimed_by"] != self._owner_id)
+            ]
+            for occurrence_id in stale:
+                db.execute(
+                    "UPDATE alarm_sessions SET phase='interrupted' "
+                    "WHERE phase IN ('active','snoozed') AND occurrence_id=?",
+                    (occurrence_id,),
+                )
+                db.execute(
+                    "UPDATE alarm_occurrences SET status='interrupted', "
+                    "detail='interrupted_after_restart', claimed_by=NULL, finished_at=? "
+                    "WHERE occurrence_id=? AND status='in_flight'",
+                    (finished, occurrence_id),
+                )
+            return len(stale)
 
         return self.store._run_write(action)
+
+    async def _recover_session(self, now: datetime) -> Occurrence | None:
+        """Reclaim a durable session only after a fail-closed target check."""
+        if self.session_factory is None or self.recovery_check is None:
+            return None
+        row = self.store._run_read(
+            lambda db: db.execute(
+                "SELECT s.* FROM alarm_sessions s JOIN alarm_occurrences o "
+                "ON o.occurrence_id=s.occurrence_id "
+                "WHERE (s.phase='active' OR (s.phase='snoozed' AND s.snooze_until<=?)) "
+                "AND o.status='in_flight' LIMIT 1",
+                (now.isoformat(),),
+            ).fetchone()
+        )
+        if row is None or row["target"] != self.target:
+            return None
+        try:
+            allowed = await asyncio.wait_for(self.recovery_check(self.target), 2.0)
+        except Exception:
+            return None
+        if allowed is not True:
+            return None
+        generation = row["generation"]
+
+        def claim(db: sqlite3.Connection) -> Occurrence | None:
+            current = db.execute(
+                "SELECT * FROM alarm_sessions WHERE occurrence_id=? "
+                "AND phase IN ('active','snoozed') AND generation=? AND target=?",
+                (row["occurrence_id"], generation, self.target),
+            ).fetchone()
+            if current is None or current["stop_epoch"] != self._epoch(db):
+                return None
+            if datetime.fromisoformat(current["deadline"]) <= now:
+                return None
+            updated = db.execute(
+                "UPDATE alarm_occurrences SET claimed_by=? "
+                "WHERE occurrence_id=? AND status='in_flight'",
+                (self._owner_id, row["occurrence_id"]),
+            )
+            if updated.rowcount != 1:
+                return None
+            db.execute(
+                "UPDATE alarm_sessions SET generation=?, phase='active', snooze_until=NULL "
+                "WHERE occurrence_id=? AND generation=?",
+                (str(uuid4()), row["occurrence_id"], generation),
+            )
+            occurrence = db.execute(
+                "SELECT * FROM alarm_occurrences WHERE occurrence_id=?", (row["occurrence_id"],)
+            ).fetchone()
+            return self._from_row(occurrence)
+
+        return self.store._run_write(claim)
 
     def _record_schedule_error(self, alarm: Alarm, code: str, detail: str) -> None:
         """Persist a recurring schedule problem so a restart cannot hide it."""
@@ -319,6 +423,15 @@ class Scheduler:
             )
             if cursor.rowcount != 1:
                 return None
+            if self.session_factory is not None:
+                deadline = (
+                    datetime.fromisoformat(created) + timedelta(seconds=self.session_max_seconds)
+                ).isoformat()
+                db.execute(
+                    "INSERT INTO alarm_sessions(occurrence_id, generation, target, stop_epoch, "
+                    "phase, created_at, deadline) VALUES (?, ?, ?, ?, 'active', ?, ?)",
+                    (occurrence_id, str(uuid4()), self.target, epoch, created, deadline),
+                )
             row = db.execute(
                 "SELECT * FROM alarm_occurrences WHERE occurrence_id = ?", (occurrence_id,)
             ).fetchone()
@@ -372,6 +485,15 @@ class Scheduler:
         finished = datetime.now(UTC).isoformat()
 
         def action(db: sqlite3.Connection) -> Occurrence:
+            session = db.execute(
+                "SELECT phase FROM alarm_sessions WHERE occurrence_id=?", (occurrence_id,)
+            ).fetchone()
+            if session is not None and session["phase"] == "snoozed":
+                row = db.execute(
+                    "SELECT * FROM alarm_occurrences WHERE occurrence_id=?", (occurrence_id,)
+                ).fetchone()
+                if row is not None and row["status"] == "in_flight":
+                    return self._from_row(row)
             cursor = db.execute(
                 "UPDATE alarm_occurrences SET status=?, detail=?, claimed_by=NULL, finished_at=? "
                 "WHERE occurrence_id=? AND status='in_flight' AND claimed_by=?",
@@ -384,6 +506,11 @@ class Scheduler:
                 raise RuntimeError("claimed occurrence disappeared")
             if cursor.rowcount != 1 and row["status"] == "in_flight":
                 raise RuntimeError("occurrence claim was lost before terminal persistence")
+            phase = "completed" if status == "completed" else "interrupted"
+            db.execute(
+                "UPDATE alarm_sessions SET phase=? WHERE occurrence_id=? AND phase='active'",
+                (phase, occurrence_id),
+            )
             self._retire_once_alarm(db, row["alarm_id"])
             return self._from_row(row)
 
@@ -413,6 +540,24 @@ class Scheduler:
 
         def action(db: sqlite3.Connection) -> bool:
             if self._epoch(db) != epoch:
+                return False
+            claim = db.execute(
+                "SELECT status, claimed_by FROM alarm_occurrences WHERE occurrence_id=?",
+                (occurrence.occurrence_id,),
+            ).fetchone()
+            if (
+                claim is None
+                or claim["status"] != "in_flight"
+                or claim["claimed_by"] != self._owner_id
+            ):
+                return False
+            session = db.execute(
+                "SELECT phase, stop_epoch FROM alarm_sessions WHERE occurrence_id=?",
+                (occurrence.occurrence_id,),
+            ).fetchone()
+            if session is not None and (
+                session["phase"] != "active" or session["stop_epoch"] != epoch
+            ):
                 return False
             row = db.execute("SELECT * FROM alarms WHERE id = ?", (occurrence.alarm_id,)).fetchone()
             if row is None:
@@ -452,6 +597,11 @@ class Scheduler:
                 "SELECT occurrence_id FROM alarm_occurrences WHERE status='in_flight'"
             ).fetchall()
             db.execute(
+                "UPDATE alarm_sessions SET phase='stopped' WHERE phase IN ('active','snoozed') "
+                "AND occurrence_id IN (SELECT occurrence_id FROM alarm_occurrences "
+                "WHERE status='in_flight')"
+            )
+            db.execute(
                 "UPDATE alarm_occurrences SET status='skipped', "
                 "detail='stop_requested_unconfirmed', claimed_by=NULL, finished_at=? "
                 "WHERE status='in_flight'",
@@ -481,7 +631,53 @@ class Scheduler:
 
     def is_ringing(self) -> bool:
         """Whether the dispatcher is playing right now."""
-        return bool(getattr(self.dispatcher, "ringing", False))
+        return self._active_session is not None or bool(getattr(self.dispatcher, "ringing", False))
+
+    async def snooze(self, now: datetime, duration: timedelta) -> bool | None:
+        """Durably defer the active generation, then request its local stop."""
+        now = self._aware_utc(now)
+        if not isinstance(duration, timedelta) or not timedelta(seconds=1) <= duration <= timedelta(
+            hours=1
+        ):
+            raise ValueError("snooze duration must be between one second and one hour")
+        active, done = self._active_session, self._session_done
+        if active is None or done is None:
+            return None
+        until = now + duration
+
+        def persist(db: sqlite3.Connection) -> bool:
+            rows = db.execute(
+                "SELECT s.occurrence_id FROM alarm_sessions s JOIN alarm_occurrences o "
+                "ON o.occurrence_id=s.occurrence_id WHERE s.phase='active' "
+                "AND s.target=? AND o.status='in_flight' AND o.claimed_by=?",
+                (self.target, self._owner_id),
+            ).fetchall()
+            if len(rows) != 1:
+                return False
+            epoch = self._epoch(db) + 1
+            db.execute(
+                "UPDATE alarm_metadata SET value=? WHERE key=?", (str(epoch), self._STOP_EPOCH_KEY)
+            )
+            db.execute(
+                "UPDATE alarm_sessions SET phase='snoozed', stop_epoch=?, generation=?, "
+                "snooze_until=?, deadline=? WHERE occurrence_id=? AND phase='active'",
+                (
+                    epoch,
+                    str(uuid4()),
+                    until.isoformat(),
+                    (until + timedelta(seconds=self.session_max_seconds)).isoformat(),
+                    rows[0]["occurrence_id"],
+                ),
+            )
+            return True
+
+        if not self.store._run_write(persist):
+            return None
+        await active.request_stop()
+        try:
+            return await asyncio.wait_for(asyncio.shield(done), timeout=15.0)
+        except TimeoutError:
+            return False
 
     async def stop(self, now: datetime) -> bool:
         """Durably fence due work, then request local adapter stop without claiming silence."""
@@ -495,7 +691,16 @@ class Scheduler:
                 await self.dispatcher.stop()
             finally:
                 raise
-        confirmed = (await self.dispatcher.stop()) is True
+        active = self._active_session
+        session_done = self._session_done
+        if active is not None and session_done is not None:
+            await active.request_stop()
+            try:
+                confirmed = await asyncio.wait_for(asyncio.shield(session_done), timeout=15.0)
+            except TimeoutError:
+                confirmed = False
+        else:
+            confirmed = (await self.dispatcher.stop()) is True
         if confirmed and ids:
             self._mark_stop_confirmed(ids)
         return confirmed
@@ -529,20 +734,29 @@ class Scheduler:
         if lock_fd is None:
             return []
         try:
-            self._recover_locked()
+            recovered = await self._recover_session(now_utc)
+            self._recover_locked(
+                preserve_owner=recovered is not None,
+                preserve_pending=self.session_factory is not None
+                and self.recovery_check is not None,
+                now=now_utc,
+            )
             if isinstance(self.dispatcher, SerialDispatcher):
                 await self.dispatcher.reconcile_volume(self.target)
             epoch = self._current_epoch()
             finished = []
-            for alarm, due in self._due(now_utc):
-                if now_utc - due > self.catchup_window(alarm):
-                    occurrence = self._skip_missed(alarm, due, epoch)
-                    if occurrence is not None:
-                        finished.append(occurrence)
-                    continue
-                occurrence = self._claim(alarm, due, epoch)
+            candidates = [(None, None, recovered)] if recovered is not None else []
+            candidates.extend((alarm, due, None) for alarm, due in self._due(now_utc))
+            for alarm, due, occurrence in candidates:
                 if occurrence is None:
-                    continue
+                    if now_utc - due > self.catchup_window(alarm):
+                        occurrence = self._skip_missed(alarm, due, epoch)
+                        if occurrence is not None:
+                            finished.append(occurrence)
+                        continue
+                    occurrence = self._claim(alarm, due, epoch)
+                    if occurrence is None:
+                        continue
                 if not self._is_still_dispatchable(occurrence, epoch):
                     finished.append(
                         self._finish(
@@ -551,7 +765,54 @@ class Scheduler:
                     )
                     continue
                 try:
-                    result: DispatchResult = await self.dispatcher.ring(self.target)
+                    if self.session_factory is None:
+                        result: DispatchResult = await self.dispatcher.ring(self.target)
+                    else:
+                        self._active_session = self.session_factory(self.target)
+                        occurrence_id = occurrence.occurrence_id
+                        deadline = self.store._run_read(
+                            lambda db, occ=occurrence_id: db.execute(
+                                "SELECT deadline FROM alarm_sessions WHERE occurrence_id=?",
+                                (occ,),
+                            ).fetchone()[0]
+                        )
+                        remaining = (
+                            datetime.fromisoformat(deadline) - datetime.now(UTC)
+                        ).total_seconds()
+                        if remaining <= 0:
+                            self._active_session = None
+                            finished.append(
+                                self._finish(
+                                    occurrence.occurrence_id, "interrupted", "deadline_expired"
+                                )
+                            )
+                            continue
+                        self._active_session.ring_seconds = min(
+                            self._active_session.ring_seconds, remaining
+                        )
+                        session_done = asyncio.get_running_loop().create_future()
+                        self._session_done = session_done
+                        session_confirmed = False
+                        watch = asyncio.create_task(
+                            self._watch_session_epoch(self._active_session, epoch)
+                        )
+                        try:
+                            report = await self._active_session.run()
+                            session_confirmed = report.outcome is SessionOutcome.STOPPED
+                        finally:
+                            watch.cancel()
+                            try:
+                                await watch
+                            except asyncio.CancelledError:
+                                pass
+                            if not session_done.done():
+                                session_done.set_result(session_confirmed)
+                            self._session_done = None
+                            self._active_session = None
+                        status = (
+                            "completed" if report.outcome is SessionOutcome.RANG_OUT else "failed"
+                        )
+                        result = DispatchResult(status, f"{report.outcome}:{report.detail}")
                 except asyncio.CancelledError:
                     # Synchronous journal write: no await, so cancellation cannot
                     # skip it. The stop request is issued by the dispatcher; the

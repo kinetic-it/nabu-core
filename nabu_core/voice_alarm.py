@@ -19,6 +19,7 @@ class IntentKind(str, Enum):  # noqa: UP042
     DEACTIVATE = "deactivate"
     DELETE = "delete"
     STOP = "stop"
+    SNOOZE = "snooze"
 
 
 class ParseStatus(str, Enum):  # noqa: UP042
@@ -38,6 +39,7 @@ class AlarmIntent:
     date: date | None = None
     label: str | None = None
     next_only: bool = False
+    snooze_minutes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +152,13 @@ class AlarmParser:
             return _error("negated_utterance")
 
         local_now = now.astimezone(self.timezone)
+        snooze = re.fullmatch(r"noch (\d{1,2}|[a-zäöüß]+) minuten?", text)
+        if snooze:
+            word = snooze.group(1)
+            minutes = int(word) if word.isdigit() else _NUMBERS.get(word)
+            if minutes is None or not 1 <= minutes <= 60:
+                return _error("invalid_snooze_duration")
+            return _ok(AlarmIntent(kind=IntentKind.SNOOZE, snooze_minutes=minutes))
         if _is_stop(text):
             return _ok(AlarmIntent(kind=IntentKind.STOP))
         if _is_list(text):

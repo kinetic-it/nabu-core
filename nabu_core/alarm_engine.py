@@ -25,7 +25,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 SLOT_IDS: Final = tuple(f"alarm-{number:02d}" for number in range(1, 11))
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 DEFAULT_CATCHUP_SECONDS: Final = 300
 MAX_CATCHUP_SECONDS: Final = 86400
 _UNSET = object()
@@ -119,6 +119,19 @@ class AlarmStore:
         }
     )
     _METADATA_COLUMNS: Final = frozenset({"key", "value"})
+    _SESSION_COLUMNS: Final = frozenset(
+        {
+            "occurrence_id",
+            "generation",
+            "target",
+            "stop_epoch",
+            "phase",
+            "created_at",
+            "deadline",
+            "snooze_until",
+            "media_id",
+        }
+    )
     _SCHEDULE_ERROR_COLUMNS: Final = frozenset(
         {"instance_id", "alarm_id", "code", "detail", "created_at"}
     )
@@ -161,6 +174,7 @@ class AlarmStore:
         "alarm_metadata",
         "alarm_occurrences",
         "alarm_schedule_errors",
+        "alarm_sessions",
     )
 
     def _create_schema(self, db: sqlite3.Connection) -> None:
@@ -214,6 +228,7 @@ class AlarmStore:
                 PRIMARY KEY (instance_id, code)
             )"""
         )
+        self._create_session_table(db)
         db.execute(
             "INSERT INTO alarm_metadata(key, value) VALUES ('timezone_name', ?)",
             (self.timezone_name,),
@@ -246,7 +261,23 @@ class AlarmStore:
                 )
             db.execute("ALTER TABLE alarms ADD COLUMN catchup_seconds INTEGER")
             db.execute("ALTER TABLE alarms ADD COLUMN catchup_enabled INTEGER NOT NULL DEFAULT 1")
-        self._assert_columns(db)
+
+    @staticmethod
+    def _create_session_table(db: sqlite3.Connection) -> None:
+        db.execute(
+            """CREATE TABLE alarm_sessions (
+                occurrence_id TEXT PRIMARY KEY,
+                generation TEXT NOT NULL,
+                target TEXT NOT NULL,
+                stop_epoch INTEGER NOT NULL,
+                phase TEXT NOT NULL CHECK (phase IN
+                    ('active', 'snoozed', 'stopped', 'completed', 'interrupted')),
+                created_at TEXT NOT NULL,
+                deadline TEXT NOT NULL,
+                snooze_until TEXT,
+                media_id TEXT
+            )"""
+        )
 
     def _assert_columns(self, db: sqlite3.Connection) -> None:
         if (
@@ -254,6 +285,7 @@ class AlarmStore:
             or self._columns(db, "alarm_metadata") != self._METADATA_COLUMNS
             or self._columns(db, "alarm_occurrences") != self._OCCURRENCE_COLUMNS
             or self._columns(db, "alarm_schedule_errors") != self._SCHEDULE_ERROR_COLUMNS
+            or self._columns(db, "alarm_sessions") != self._SESSION_COLUMNS
         ):
             raise DatabaseCompatibilityError(
                 "database schema is incompatible; migration is not supported"
@@ -290,12 +322,16 @@ class AlarmStore:
                     self._create_schema(db)
                     db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 else:
-                    if tables != set(self._EXPECTED_TABLES):
+                    expected = set(self._EXPECTED_TABLES)
+                    legacy = expected - {"alarm_sessions"}
+                    if tables != (legacy if version in (0, 1, 2) else expected):
                         raise DatabaseCompatibilityError(
                             "database schema is incompatible; unexpected table set"
                         )
-                    if version in (0, 1):
-                        self._migrate_forward(db)
+                    if version in (0, 1, 2):
+                        if version in (0, 1):
+                            self._migrate_forward(db)
+                        self._create_session_table(db)
                         db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                     elif version != SCHEMA_VERSION:
                         raise DatabaseCompatibilityError(

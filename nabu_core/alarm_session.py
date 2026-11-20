@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Awaitable, Callable, Protocol
+from typing import Protocol
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,10 +66,12 @@ class AlarmSession:
     ring: Callable[[], Awaitable[object]]
     stop: Callable[[], Awaitable[bool]]
     state_of: Callable[[], Awaitable[str]]
+    interaction_active: Callable[[], Awaitable[bool]] | None = None
     music: MusicController | None = None
     poll: float = 0.5
     max_restarts: int = 2
     ring_seconds: float = 600.0
+    restart_delay: float = 0.0
     _stop_requested: asyncio.Event = field(default_factory=asyncio.Event)
     _wake: asyncio.Event = field(default_factory=asyncio.Event)
     _claim: _MusicClaim | None = None
@@ -80,6 +83,8 @@ class AlarmSession:
             raise ValueError("max_restarts must not be negative")
         if not 0 < self.ring_seconds <= 3600:
             raise ValueError("ring_seconds must be between 0 and 3600")
+        if not 0 <= self.restart_delay <= 10:
+            raise ValueError("restart_delay must be between 0 and 10 seconds")
 
     async def request_stop(self) -> bool:
         """Ask the session to end now.
@@ -96,34 +101,95 @@ class AlarmSession:
     async def run(self) -> SessionReport:
         claim = await self._pause_music()
         restarts = 0
+        deadline = asyncio.get_running_loop().time() + self.ring_seconds
         try:
             while True:
+                if self._stop_requested.is_set():
+                    stopped = await self._quietly_stop()
+                    outcome = SessionOutcome.STOPPED if stopped else SessionOutcome.STOP_UNCONFIRMED
+                    return await self._finish(outcome, "stop_requested", restarts)
+                if asyncio.get_running_loop().time() >= deadline:
+                    return await self._finish(
+                        SessionOutcome.RANG_OUT, "ring_seconds_elapsed", restarts
+                    )
+                if self.interaction_active is not None:
+                    try:
+                        active = await asyncio.wait_for(self.interaction_active(), timeout=1.0)
+                    except Exception as error:
+                        return await self._finish(
+                            SessionOutcome.NEEDS_ATTENTION,
+                            f"interaction_state_unavailable:{type(error).__name__}",
+                            restarts,
+                        )
+                    if not isinstance(active, bool):
+                        return await self._finish(
+                            SessionOutcome.NEEDS_ATTENTION, "interaction_state_unknown", restarts
+                        )
+                    if active:
+                        if asyncio.get_running_loop().time() >= deadline:
+                            return await self._finish(
+                                SessionOutcome.RANG_OUT, "ring_seconds_elapsed", restarts
+                            )
+                        try:
+                            await asyncio.wait_for(self._wake.wait(), self.poll)
+                        except TimeoutError:
+                            pass
+                        continue
                 ring_task = asyncio.create_task(self._ring_once())
-                reason = await self._supervise(ring_task)
+                reason = await self._supervise(ring_task, deadline)
                 if reason is not None:
                     # Whatever ended the ring, the device gets exactly one stop request here.
                     stopped = await self._quietly_stop()
                     await self._settle_task(ring_task)
                     if reason == "stop_requested":
-                        outcome = SessionOutcome.STOPPED if stopped else SessionOutcome.STOP_UNCONFIRMED
+                        outcome = (
+                            SessionOutcome.STOPPED if stopped else SessionOutcome.STOP_UNCONFIRMED
+                        )
                         return await self._finish(outcome, "stop_requested", restarts)
                     if reason == "rang_out":
-                        return await self._finish(SessionOutcome.RANG_OUT, "ring_seconds_elapsed", restarts)
+                        return await self._finish(
+                            SessionOutcome.RANG_OUT, "ring_seconds_elapsed", restarts
+                        )
                     if restarts >= self.max_restarts:
                         return await self._finish(SessionOutcome.NEEDS_ATTENTION, reason, restarts)
                     restarts += 1
                     _LOGGER.warning(
-                        "Alarm ring ended early (%s); restarting (%d/%d)", reason, restarts, self.max_restarts
+                        "Alarm ring ended early (%s); restarting (%d/%d)",
+                        reason,
+                        restarts,
+                        self.max_restarts,
                     )
+                    await self._restart_pause(deadline)
                     continue
                 verdict = self._ring_result(ring_task)
                 if verdict is None:
-                    return await self._finish(SessionOutcome.STOPPED, "ring_finished", restarts)
+                    if self._stop_requested.is_set():
+                        stopped = await self._quietly_stop()
+                        outcome = (
+                            SessionOutcome.STOPPED if stopped else SessionOutcome.STOP_UNCONFIRMED
+                        )
+                        return await self._finish(outcome, "stop_requested", restarts)
+                    if restarts >= self.max_restarts:
+                        return await self._finish(
+                            SessionOutcome.NEEDS_ATTENTION, "ring_finished", restarts
+                        )
+                    restarts += 1
+                    await self._restart_pause(deadline)
+                    continue
                 if verdict[0] is SessionOutcome.START_FAILED:
-                    await self._quietly_stop()      # a refused start may still have been accepted once
+                    await self._quietly_stop()  # a refused start may have been accepted once
                 return await self._finish(verdict[0], verdict[1], restarts)
         finally:
             await self._resume_music(claim)
+
+    async def _restart_pause(self, deadline: float) -> None:
+        remaining = deadline - asyncio.get_running_loop().time()
+        delay = min(self.restart_delay, max(remaining, 0.0))
+        if delay:
+            try:
+                await asyncio.wait_for(self._wake.wait(), delay)
+            except TimeoutError:
+                pass
 
     @staticmethod
     async def _settle_task(task: asyncio.Task) -> None:
@@ -132,8 +198,10 @@ class AlarmSession:
             task.cancel()
         try:
             await task
-        except (asyncio.CancelledError, Exception):
-            pass
+        except asyncio.CancelledError:
+            _LOGGER.debug("Ring task cancelled during cleanup")
+        except Exception:
+            _LOGGER.exception("Ring task failed during cleanup")
 
     async def _ring_once(self) -> object:
         return await self.ring()
@@ -144,12 +212,12 @@ class AlarmSession:
         try:
             result = ring_task.result()
         except asyncio.CancelledError:
-            return SessionOutcome.STOPPED, "ring_cancelled"
+            return SessionOutcome.NEEDS_ATTENTION, "ring_cancelled"
         except Exception as error:
             return SessionOutcome.START_FAILED, type(error).__name__
-        outcome = str(getattr(result, "outcome", "") or "")
+        outcome = str(getattr(result, "status", None) or getattr(result, "outcome", "") or "")
         detail = str(getattr(result, "detail", "") or "")
-        if outcome in {"completed", "stopped"}:
+        if outcome == "completed":
             return None
         if outcome == "failed":
             return SessionOutcome.START_FAILED, f"ring_failed:{detail}"
@@ -159,28 +227,35 @@ class AlarmSession:
             return None
         if outcome == "unsettled":
             return SessionOutcome.NEEDS_ATTENTION, "previous_call_active"
-        return None
+        return SessionOutcome.NEEDS_ATTENTION, f"unexpected_ring_result:{outcome}"
 
-    async def _supervise(self, ring_task: asyncio.Task) -> str | None:
+    async def _supervise(self, ring_task: asyncio.Task, deadline: float) -> str | None:
         """Wait for the ring to end. Returns why it ended early, or None if it ran out."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.ring_seconds
         while True:
-            if ring_task.done():
-                return None
             if self._stop_requested.is_set():
                 return "stop_requested"
             if loop.time() >= deadline:
                 return "rang_out"
-            try:                                        # react to a stop at once, not after the poll
+            if ring_task.done():
+                return None
+            try:  # react to a stop at once, not after the poll
                 await asyncio.wait_for(self._wake.wait(), self.poll)
-            except (asyncio.TimeoutError, TimeoutError):
+            except TimeoutError:
                 pass
             if ring_task.done():
                 return None
+            if self.interaction_active is not None:
+                try:
+                    active = await asyncio.wait_for(self.interaction_active(), timeout=1.0)
+                except Exception:
+                    return "interaction_state_unavailable"
+                if active is not False:
+                    return "interaction_active_or_unknown"
             try:
                 state = str(await self.state_of()).lower()
-            except Exception:                                # unreadable state is not proof of ringing
+            except Exception as error:
+                _LOGGER.debug("Alarm player state unreadable: %s", type(error).__name__)
                 continue
             if state in IDLE_STATES:
                 # The file ended (or the player dropped it) while the alarm is still due.
@@ -209,7 +284,7 @@ class AlarmSession:
     async def _resume_music(self, claim: _MusicClaim | None) -> None:
         if claim is None:
             return
-        stopped = (await self._state_is_quiet())
+        stopped = await self._state_is_quiet()
         if not stopped:
             # Two streams at once is exactly what this session exists to prevent.
             claim.resumed = False

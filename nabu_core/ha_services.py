@@ -126,6 +126,7 @@ class AlarmServiceLayer:
             self.service,
             stop_callback=self._voice_stop,
             ringing_callback=self._voice_ringing,
+            snooze_callback=self._voice_snooze,
         )
 
     async def utterance(self, data: Mapping[str, Any]) -> ServiceResult:
@@ -144,7 +145,8 @@ class AlarmServiceLayer:
         except Exception as error:  # noqa: BLE001 - a spoken service must not crash
             return _failure(error)
         return ServiceResult(
-            ok=result.code in {"OK", "STOP_REQUESTED", "CLARIFICATION_REQUIRED"},
+            ok=result.code
+            in {"OK", "STOP_REQUESTED", "SNOOZE_REQUESTED", "CLARIFICATION_REQUIRED"},
             code=result.code,
             data={
                 "confirmation": result.confirmation,
@@ -160,7 +162,15 @@ class AlarmServiceLayer:
     async def _voice_stop(self) -> bool:
         if self.stop_callback is None:
             raise RuntimeError("stop is not wired")
-        return bool(await self.stop())
+        result = await self.stop()
+        if not result.ok:
+            raise RuntimeError(result.code)
+        return bool(result.data and result.data.get("confirmed") is True)
+
+    async def _voice_snooze(self, minutes: int) -> bool | None:
+        if self.scheduler is None:
+            return None
+        return await self.scheduler.snooze(datetime.now(UTC), timedelta(minutes=minutes))
 
     # ----------------------------------------------------------------- write
     def create(self, data: Mapping[str, Any]) -> ServiceResult:

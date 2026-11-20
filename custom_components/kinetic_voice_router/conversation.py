@@ -273,6 +273,10 @@ class KineticVoiceRouterConversationEntity(conversation.ConversationEntity):
         if parsed.intent is None:
             return None
 
+        kind = str(getattr(parsed.intent.kind, "value", parsed.intent.kind))
+        if kind == "snooze" and not voice.is_ringing():
+            return None
+
         try:
             result = await voice.handle(text, now=datetime.now(UTC))
         except Exception as err:  # noqa: BLE001 - the chat must survive a broken alarm

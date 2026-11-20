@@ -89,12 +89,16 @@ class MediaPlayerAdapter:
         cycle_on: float = 0.0,
         cycle_off: float = 0.0,
         recovery_store=None,
+        allow_paused: bool = False,
     ) -> None:
         if not 0 < max_seconds <= 3600:
             raise ValueError("max_seconds must be positive and at most 3600")
         self._client = client
         self._policy = policy
         self._media = media
+        # A paused player is occupied by somebody's queue. Only a session that
+        # owns that pause (the music controller) may start on top of it.
+        self._allow_paused = allow_paused
         self._max_seconds = max_seconds
         self._start_timeout = min(max_seconds, 5.0)
         self._stop_timeout = min(max_seconds, 5.0)
@@ -216,11 +220,13 @@ class MediaPlayerAdapter:
             return None
         async with asyncio.timeout(IO_TIMEOUT):
             observed = await reader(ring.target)
-        if observed is not None:
-            if ring.media_id is not None and observed != ring.media_id:
-                ring.displaced = True
-            elif ring.started:
-                ring.media_id = observed
+        if not observed:
+            return None
+        expected = ring.media_id or self._media[1]
+        if observed != expected:
+            ring.displaced = True
+        elif ring.started:
+            ring.media_id = observed
         return not ring.displaced
 
     async def _set_volume(self, ring: _Ring, level: float) -> bool:
@@ -325,6 +331,12 @@ class MediaPlayerAdapter:
         result = PlaybackOutcome(PlaybackStatus.STOP_UNCONFIRMED, ring.target, "no_playback")
         async with self._media_lock:
             try:
+                state = await self._state(ring.target)
+                if ring.started and state in {"idle", "off", "standby"}:
+                    result = PlaybackOutcome(
+                        PlaybackStatus.STOPPED_CONFIRMED, ring.target, "already_idle"
+                    )
+                    return result
                 owned = await self._identify_media(ring)
                 if owned is None:
                     # Unobservable identity is a refusal, not a licence to stop: the
@@ -466,7 +478,12 @@ class MediaPlayerAdapter:
         ring = self._ring = _Ring(target)
         try:
             async with self._media_lock:
-                if await self._state(target) not in {"idle", "off", "standby"}:
+                allowed_states = (
+                    {"idle", "off", "standby", "paused"}
+                    if self._allow_paused
+                    else {"idle", "off", "standby"}
+                )
+                if await self._state(target) not in allowed_states:
                     raise RuntimeError("alarm target is busy or unavailable")
                 if self._volume is not None and not await self._set_volume(ring, self._volume):
                     raise RuntimeError("ring volume not confirmed")
@@ -491,9 +508,11 @@ class MediaPlayerAdapter:
                 now = loop.time()
                 if ring.stopping or now >= deadline:
                     break
+                state = await self._state(ring.target)
+                if state == "idle" and not self._repeat:
+                    return
                 if not await self._identify_media(ring):
                     raise RuntimeError("alarm media replaced")
-                state = await self._state(ring.target)
                 if state not in PLAYING_STATES | {"idle"}:
                     raise RuntimeError("alarm playback interrupted or unavailable")
                 if now < ring.duck_until:

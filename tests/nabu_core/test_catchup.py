@@ -112,7 +112,7 @@ def test_v1_database_is_migrated_without_losing_data(tmp_path):
     assert migrated.catchup_enabled is True
     assert migrated.catchup_seconds is None
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         assert (
             db.execute(
                 "SELECT value FROM alarm_metadata WHERE key='scheduler_stop_epoch'"
@@ -128,7 +128,7 @@ def test_migration_is_idempotent_and_keeps_epoch(tmp_path):
     AlarmStore(path)
 
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_future_schema_version_fails_closed(tmp_path):

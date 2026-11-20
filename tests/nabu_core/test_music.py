@@ -23,7 +23,11 @@ class Client:
 
     async def get_attributes(self, entity_id):
         assert entity_id == ENTITY
-        return {"media_content_id": self.media, "media_position": self.position, "volume_level": self.volume}
+        return {
+            "media_content_id": self.media,
+            "media_position": self.position,
+            "volume_level": self.volume,
+        }
 
     async def pause(self, entity_id):
         self.calls.append("pause")
@@ -87,7 +91,7 @@ async def test_resume_reports_failure_when_the_player_stays_idle():
     client = Client(state="paused")
     client.play_works = False
     controller = HaMusicController(client, entity_id=ENTITY)
-    assert await controller.resume(MusicToken(ENTITY)) is False
+    assert await controller.resume(MusicToken(ENTITY, media_id="song.mp3")) is False
     assert client.calls == ["play"]
 
 
@@ -102,7 +106,10 @@ async def test_seek_is_optional():
     assert client.calls == [("seek", 42.5)]
 
     plain = Client(state="paused")
-    assert await HaMusicController(plain, entity_id=ENTITY).seek(MusicToken(ENTITY, position=1.0)) is False
+    assert (
+        await HaMusicController(plain, entity_id=ENTITY).seek(MusicToken(ENTITY, position=1.0))
+        is False
+    )
 
 
 async def test_attributes_are_optional():

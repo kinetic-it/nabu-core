@@ -120,15 +120,25 @@ async def test_a_file_that_ends_early_does_not_end_the_alarm():
 
 
 async def test_restart_after_a_dropped_playback_keeps_ringing():
-    device = Device(ring_block=False)
-    device.state = "playing"
-    sess = session(device, Music(), poll=0.01)
+    device = Device()
+    restarted = asyncio.Event()
+
+    async def ring():
+        if device.rings == 0:
+            device.rings += 1
+            return RingResult("completed")
+        restarted.set()
+        return await device.ring()
+
+    sess = AlarmSession(
+        ring=ring, stop=device.stop, state_of=device.state_of, music=Music(), poll=0.01
+    )
     task = asyncio.create_task(sess.run())
-    await asyncio.sleep(0.12)
+    await asyncio.wait_for(restarted.wait(), 1)
     await sess.request_stop()
     report = await asyncio.wait_for(task, 2)
     assert report.outcome is SessionOutcome.STOPPED
-    assert device.rings >= 1
+    assert device.rings == 2
 
 
 async def test_failed_start_leaves_no_alarm_and_restores_music():

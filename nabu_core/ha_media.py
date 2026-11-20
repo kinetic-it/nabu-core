@@ -56,6 +56,28 @@ class HomeAssistantMediaClient:
             return {}
         return state.attributes
 
+    async def get_attributes(self, entity_id: str) -> dict:
+        """Public read for the music controller; empty means "not observable"."""
+        return dict(self._attributes(entity_id))
+
+    async def pause(self, entity_id: str) -> None:
+        await self._hass.services.async_call(
+            "media_player", "media_pause", {"entity_id": entity_id}, blocking=True
+        )
+
+    async def play(self, entity_id: str) -> None:
+        await self._hass.services.async_call(
+            "media_player", "media_play", {"entity_id": entity_id}, blocking=True
+        )
+
+    async def seek(self, entity_id: str, position: float) -> None:
+        await self._hass.services.async_call(
+            "media_player",
+            "media_seek",
+            {"entity_id": entity_id, "seek_position": position},
+            blocking=True,
+        )
+
     async def get_media_id(self, entity_id: str) -> str | None:
         value = self._attributes(entity_id).get("media_content_id")
         return value if isinstance(value, str) and value else None

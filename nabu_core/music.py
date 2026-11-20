@@ -62,7 +62,7 @@ class HaMusicController:
         try:
             async with asyncio.timeout(IO_TIMEOUT):
                 return dict(await self._client.get_attributes(self._entity) or {})
-        except Exception as error:                      # attributes are a bonus, not a precondition
+        except Exception as error:  # attributes are a bonus, not a precondition
             _LOGGER.warning("Music attributes unreadable: %s", type(error).__name__)
             return {}
 
@@ -70,7 +70,7 @@ class HaMusicController:
         """Pause our music. Returns None when there was nothing of ours to pause."""
         state = await self._state()
         if state not in PLAYING_STATES:
-            return None                                  # silence, a foreign stream or a stopped queue
+            return None  # silence, a foreign stream or a stopped queue
         attributes = await self._attributes()
         token = MusicToken(
             entity_id=self._entity,
@@ -91,11 +91,11 @@ class HaMusicController:
         """Bring back exactly what was paused, unless somebody else owns the speaker now."""
         state = await self._state()
         if state in PLAYING_STATES:
-            return False                                 # already playing: not ours to start twice
+            return False  # already playing: not ours to start twice
         attributes = await self._attributes()
         current = attributes.get("media_content_id") or attributes.get("media_title")
-        if token.media_id is not None and current is not None and current != token.media_id:
-            _LOGGER.warning("Music resume skipped: the speaker holds different media now")
+        if token.entity_id != self._entity or not token.media_id or current != token.media_id:
+            _LOGGER.warning("Music resume skipped: media identity is missing or changed")
             return False
         async with asyncio.timeout(IO_TIMEOUT):
             await self._client.play(self._entity)

@@ -266,10 +266,12 @@ class VoiceAlarmAdapter:
         *,
         stop_callback: Callable[[], Awaitable[bool | None]] | None = None,
         ringing_callback: Callable[[], bool] | None = None,
+        snooze_callback: Callable[[int], Awaitable[bool | None]] | None = None,
     ) -> None:
         self.service = service
         self.parser = AlarmParser(timezone=service.store.zone)
         self.stop_callback = stop_callback
+        self.snooze_callback = snooze_callback
         # A bare "stopp" only belongs to us while an alarm is actually ringing;
         # otherwise it has to reach whatever else the user is talking to.
         self.ringing_callback = ringing_callback
@@ -306,6 +308,20 @@ class VoiceAlarmAdapter:
             return self._deactivate(intent)
         if intent.kind is IntentKind.STOP:
             return await self._stop()
+        if intent.kind is IntentKind.SNOOZE:
+            if self.snooze_callback is None or intent.snooze_minutes is None:
+                return ApiResult(code="NOT_IMPLEMENTED")
+            try:
+                confirmed = await self.snooze_callback(intent.snooze_minutes)
+            except Exception:
+                return ApiResult(code="SNOOZE_FAILED")
+            if confirmed is None:
+                return ApiResult(code="NOT_RINGING")
+            note = "" if confirmed else " Der Wiedergabestopp ist nicht bestätigt."
+            return ApiResult(
+                code="SNOOZE_REQUESTED",
+                confirmation=f"Schlummern für {intent.snooze_minutes} Minuten angefordert.{note}",
+            )
         return ApiResult(code="NOT_IMPLEMENTED")
 
     def _list_confirmation(self, result: ApiResult, *, next_only: bool) -> ApiResult:
