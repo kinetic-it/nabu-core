@@ -14,6 +14,7 @@ import math
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
+from urllib.parse import unquote
 
 from .devices import DevicePolicy
 from .volume_journal import VolumeJournal
@@ -23,6 +24,81 @@ IO_TIMEOUT = 1.0
 VOLUME_TOLERANCE = 0.005
 STOPPED_STATES = frozenset({"idle", "off", "paused", "standby"})
 PLAYING_STATES = frozenset({"playing", "buffering"})
+MEDIA_PREFIXES = ("media-source://", "media-source:/", "media_source://")
+IDENTITY_MATCH = "match"
+IDENTITY_FOREIGN = "foreign"
+IDENTITY_UNKNOWN = "unknown"
+
+
+def normalise_media_id(value: object) -> str | None:
+    """Canonical form of a media identifier; None when there is nothing to compare.
+
+    Home Assistant reports the same file in several shapes: as configured
+    (``media-source://media_source/local/x.wav``), as ``media-source://local/x.wav``,
+    as a plain path or as a resolved URL. Comparing raw strings turns those harmless
+    variants into "somebody replaced our alarm".
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for _ in range(2):  # tolerate double percent-encoding
+        decoded = unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    for _ in range(3):  # media-source URIs nest: media-source://media_source/local/x
+        lowered = text.lower()
+        for prefix in MEDIA_PREFIXES:
+            if lowered.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+        else:
+            if lowered.startswith("media_source/"):
+                text = text[len("media_source/") :]
+            else:
+                break
+    scheme = ""
+    if "://" in text:
+        scheme, _, rest = text.partition("://")
+        scheme = scheme.lower() + "://"
+        host, _, path = rest.partition("/")
+        text = host.lower() + "/" + path
+    while "//" in text:
+        text = text.replace("//", "/")
+    text = text.strip().strip("/")
+    if not text:
+        return None
+    return scheme + text
+
+
+def media_basename(canonical: str | None) -> str | None:
+    """File part of a canonical identifier, used as a tolerant fallback."""
+    if not canonical:
+        return None
+    return canonical.rsplit("/", 1)[-1] or None
+
+
+def media_identity(observed: object, expected: object) -> str:
+    """Classify how a reported media identifier relates to the expected one.
+
+    ``match``   - same file, whatever shape the player reports it in
+    ``foreign`` - a demonstrably different file; nothing of ours is playing
+    ``unknown`` - the player reports nothing, so nothing may be assumed
+    """
+    left = normalise_media_id(observed)
+    right = normalise_media_id(expected)
+    if left is None or right is None:
+        return IDENTITY_UNKNOWN
+    if left == right:
+        return IDENTITY_MATCH
+    left_name, right_name = media_basename(left), media_basename(right)
+    if left_name is not None and left_name == right_name:
+        return IDENTITY_MATCH
+    if left.endswith("/" + right) or right.endswith("/" + left):
+        return IDENTITY_MATCH
+    return IDENTITY_FOREIGN
 
 
 class PlaybackStatus(StrEnum):
@@ -208,26 +284,35 @@ class MediaPlayerAdapter:
             0.0 if expected == 0 else VOLUME_TOLERANCE
         )
 
-    async def _identify_media(self, ring: _Ring) -> bool | None:
-        """Does the player still report our alarm? None when it cannot say.
+    async def _identify_media(self, ring: _Ring) -> str:
+        """How the player's current media relates to our alarm.
 
-        A player that exposes no media identifier leaves ownership unproven. That is
-        not the same as "it is ours": stopping on a guess can silence somebody else's
-        music, so callers must treat None as a refusal, not as consent.
+        ``unknown`` means the player cannot say what is playing; ``foreign`` means a
+        demonstrably different track, so a stop would silence somebody else's audio.
         """
         reader = getattr(self._client, "get_media_id", None)
         if reader is None:
-            return None
+            return IDENTITY_UNKNOWN
         async with asyncio.timeout(IO_TIMEOUT):
             observed = await reader(ring.target)
-        if not observed:
-            return None
-        expected = ring.media_id or self._media[1]
-        if observed != expected:
+        relation = media_identity(observed, ring.media_id or self._media[1])
+        if relation == IDENTITY_FOREIGN:
             ring.displaced = True
-        elif ring.started:
-            ring.media_id = observed
-        return not ring.displaced
+        elif relation == IDENTITY_MATCH and ring.started and observed:
+            ring.media_id = normalise_media_id(observed) or ring.media_id
+        return relation
+
+    def _owns_playback(self, ring: _Ring, state: str) -> bool:
+        """May a stop be sent although no media identifier can be read?
+
+        Only for playback this ring started itself, i.e. after our own ``play_media``
+        was confirmed by a playing state. Refusing then would leave the alarm ringing
+        forever, which is the worse failure for an alarm clock; anything we did not
+        start stays untouched.
+        """
+        if ring.started:
+            return True
+        return ring.play_attempted and state in PLAYING_STATES
 
     async def _set_volume(self, ring: _Ring, level: float) -> bool:
         setter = getattr(self._client, "set_volume", None)
@@ -337,16 +422,16 @@ class MediaPlayerAdapter:
                         PlaybackStatus.STOPPED_CONFIRMED, ring.target, "already_idle"
                     )
                     return result
-                owned = await self._identify_media(ring)
-                if owned is None:
-                    # Unobservable identity is a refusal, not a licence to stop: the
-                    # playing content may be somebody else's.
-                    return PlaybackOutcome(
-                        PlaybackStatus.STOP_UNCONFIRMED, ring.target, "media_identity_unavailable"
-                    )
-                if not owned:
+                relation = await self._identify_media(ring)
+                if relation == IDENTITY_FOREIGN:
                     return PlaybackOutcome(
                         PlaybackStatus.STOP_UNCONFIRMED, ring.target, "media_replaced"
+                    )
+                if relation == IDENTITY_UNKNOWN and not self._owns_playback(ring, state):
+                    # Nothing was started here, so the playing content is somebody
+                    # else's and must keep playing.
+                    return PlaybackOutcome(
+                        PlaybackStatus.STOP_UNCONFIRMED, ring.target, "media_identity_unavailable"
                     )
                 if ring.play_attempted and not ring.started:
                     # A service timeout can occur after the player accepted the
@@ -356,9 +441,9 @@ class MediaPlayerAdapter:
                     if reader is not None and await self._state(ring.target) in PLAYING_STATES:
                         async with asyncio.timeout(IO_TIMEOUT):
                             observed = await reader(ring.target)
-                        if observed == self._media[1]:
+                        if media_identity(observed, self._media[1]) == IDENTITY_MATCH:
                             ring.started = True
-                            ring.media_id = observed
+                            ring.media_id = normalise_media_id(observed)
                 if ring.started:
                     result = await self._stop_transport(
                         ring.target, wait=self._stop_timeout, interval=0.1
@@ -431,13 +516,13 @@ class MediaPlayerAdapter:
             try:
                 if await self._state(target) not in PLAYING_STATES | {"idle"}:
                     return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target, "not_available")
-                owned = await self._identify_media(ring)
-                if owned is None:
+                relation = await self._identify_media(ring)
+                if relation == IDENTITY_FOREIGN:
+                    return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target, "media_replaced")
+                if relation == IDENTITY_UNKNOWN and not ring.started:
                     return PlaybackOutcome(
                         PlaybackStatus.DUCK_FAILED, target, "media_identity_unavailable"
                     )
-                if not owned:
-                    return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target, "media_replaced")
                 # Remember a mute attempt even if observation fails: no proof of
                 # ducking is not proof that the player stayed at the previous level.
                 ring.duck_active = True
@@ -462,9 +547,15 @@ class MediaPlayerAdapter:
         if observed.status is not PlaybackStatus.PLAYING_CONFIRMED:
             raise RuntimeError(f"playback not confirmed: {observed.detail}")
         # At start, unknown identity is expected (a player may expose none); only a
-        # positive mismatch is a failure. Stop and duck refuse unknown identity later.
-        if await self._identify_media(ring) is False:
-            raise RuntimeError("alarm media replaced")
+        # positive mismatch is a failure. Stop and duck fall back to ownership later.
+        relation = await self._identify_media(ring)
+        if relation == IDENTITY_FOREIGN:
+            raise RuntimeError("alarm media replaced by other content")
+        if relation == IDENTITY_UNKNOWN:
+            _LOGGER.warning(
+                "Alarm media identifier unreadable on %s; ringing without identity proof",
+                ring.target,
+            )
 
     async def play(self, entity_id: str) -> PlaybackOutcome:
         """Own one alarm ring; perform cleanup exactly once even on cancellation."""
@@ -511,8 +602,8 @@ class MediaPlayerAdapter:
                 state = await self._state(ring.target)
                 if state == "idle" and not self._repeat:
                     return
-                if not await self._identify_media(ring):
-                    raise RuntimeError("alarm media replaced")
+                if await self._identify_media(ring) == IDENTITY_FOREIGN:
+                    raise RuntimeError("alarm media replaced by other content")
                 if state not in PLAYING_STATES | {"idle"}:
                     raise RuntimeError("alarm playback interrupted or unavailable")
                 if now < ring.duck_until:

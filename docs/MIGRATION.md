@@ -55,3 +55,32 @@ router and behaves like plain Hermes. Nothing else is affected.
 
 No automatic pipeline change, no automatic exposure of entities, no token creation, no change
 to Hermes profiles, models or providers.
+
+## Alarm database: schema 3 (`alarm_sessions`) and how to go back
+
+The alarm store migrates itself the first time this code opens the database — **without any
+option being set**. Verified on a copy of the live database (schema 2, 10 occurrences,
+stop epoch 8): the step adds the table `alarm_sessions` and raises `PRAGMA user_version`
+to 3; alarms, occurrences, metadata and the epoch survive, `PRAGMA integrity_check` is `ok`.
+
+That also means: **a git checkout of the previous code is not a rollback.** The old code
+compares the table set exactly and refuses the extra table
+(`DatabaseCompatibilityError: database schema is incompatible; unexpected table set`), after
+which the integration sets up without alarm services instead of failing loudly.
+
+Rollback, in order of preference:
+
+1. **Restore the copy (recommended).** Stop Home Assistant, remove
+   `alarms.sqlite`, `alarms.sqlite-wal` and `alarms.sqlite-shm`, copy the pre-install backup
+   back, verify `PRAGMA user_version` is 2 and `PRAGMA integrity_check` is `ok`, then restore
+   the old `custom_components/kinetic_voice_router` folder and start. A leftover `-wal`
+   replays the migration on the next open, so it must go.
+2. **Controlled downgrade (offline, documented stopgap).** With the database closed, drop
+   `alarm_sessions` and set `user_version = 2`; the previous code then accepts the file and
+   the next start of this code migrates again. This discards the stored session identity that
+   the stop fence relies on, so take a fresh backup first.
+
+Notes for the person doing it: the alarm volume and the pilot filter are config-entry options,
+not part of the database, so they have to be reverted separately. And a stop that was
+recorded as `stop_confirmed` in schema 3 is gone after restoring an older copy — check the
+journal afterwards instead of assuming silence.

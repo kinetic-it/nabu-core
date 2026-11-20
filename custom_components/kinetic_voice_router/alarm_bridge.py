@@ -209,10 +209,21 @@ def build_alarm_layer(hass, options: Mapping[str, Any]):
         return await gate.interaction_active()
 
     async def recovery_check(target):
-        return (
-            str(await media_client.get_state(target)).lower() in {"idle", "off", "standby"}
-            and await interaction_active() is False
-        )
+        state = str(await media_client.get_state(target)).lower()
+        if state not in {"idle", "off", "standby"}:
+            return False
+        try:
+            active = await interaction_active()
+        except Exception as error:
+            # An unreadable satellite must not keep a due alarm from being resumed.
+            _LOGGER.warning(
+                "Alarm recovery: satellite state unreadable (%s); resuming", type(error).__name__
+            )
+            return True
+        if not isinstance(active, bool):
+            _LOGGER.warning("Alarm recovery: satellite state unknown; resuming")
+            return True
+        return active is False
 
     def session_factory(target):
         async def guarded_ring():

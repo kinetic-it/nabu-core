@@ -43,6 +43,7 @@ class SessionReport:
     detail: str = ""
     restarts: int = 0
     music_resumed: bool | None = None
+    warnings: tuple[str, ...] = ()
 
 
 class MusicController(Protocol):
@@ -75,6 +76,8 @@ class AlarmSession:
     _stop_requested: asyncio.Event = field(default_factory=asyncio.Event)
     _wake: asyncio.Event = field(default_factory=asyncio.Event)
     _claim: _MusicClaim | None = None
+    _warnings: list[str] = field(default_factory=list)
+    _last_retry_detail: str | None = None
 
     def __post_init__(self) -> None:
         if not self.poll > 0:
@@ -109,23 +112,18 @@ class AlarmSession:
                     outcome = SessionOutcome.STOPPED if stopped else SessionOutcome.STOP_UNCONFIRMED
                     return await self._finish(outcome, "stop_requested", restarts)
                 if asyncio.get_running_loop().time() >= deadline:
+                    if self._last_retry_detail is not None:
+                        # The alarm never got through: saying "rang out" would claim
+                        # a ring that never happened.
+                        return await self._finish(
+                            SessionOutcome.NEEDS_ATTENTION, self._last_retry_detail, restarts
+                        )
                     return await self._finish(
                         SessionOutcome.RANG_OUT, "ring_seconds_elapsed", restarts
                     )
                 if self.interaction_active is not None:
-                    try:
-                        active = await asyncio.wait_for(self.interaction_active(), timeout=1.0)
-                    except Exception as error:
-                        return await self._finish(
-                            SessionOutcome.NEEDS_ATTENTION,
-                            f"interaction_state_unavailable:{type(error).__name__}",
-                            restarts,
-                        )
-                    if not isinstance(active, bool):
-                        return await self._finish(
-                            SessionOutcome.NEEDS_ATTENTION, "interaction_state_unknown", restarts
-                        )
-                    if active:
+                    active = await self._interaction()
+                    if active is True:
                         if asyncio.get_running_loop().time() >= deadline:
                             return await self._finish(
                                 SessionOutcome.RANG_OUT, "ring_seconds_elapsed", restarts
@@ -163,6 +161,7 @@ class AlarmSession:
                     continue
                 verdict = self._ring_result(ring_task)
                 if verdict is None:
+                    self._last_retry_detail = None  # a ring did happen
                     if self._stop_requested.is_set():
                         stopped = await self._quietly_stop()
                         outcome = (
@@ -174,6 +173,42 @@ class AlarmSession:
                             SessionOutcome.NEEDS_ATTENTION, "ring_finished", restarts
                         )
                     restarts += 1
+                    await self._restart_pause(deadline)
+                    continue
+                if verdict[0] is SessionOutcome.START_FAILED and self._retryable(verdict[1]):
+                    # A refused start may have been accepted once; clear it first.
+                    await self._quietly_stop()
+                    if restarts >= self.max_restarts or (
+                        asyncio.get_running_loop().time() >= deadline
+                    ):
+                        return await self._finish(
+                            SessionOutcome.NEEDS_ATTENTION, verdict[1], restarts
+                        )
+                    restarts += 1
+                    self._last_retry_detail = verdict[1]
+                    _LOGGER.warning(
+                        "Alarm could not ring yet (%s); retrying (%d/%d)",
+                        verdict[1],
+                        restarts,
+                        self.max_restarts,
+                    )
+                    await self._restart_pause(deadline)
+                    continue
+                if verdict[0] is SessionOutcome.NEEDS_ATTENTION and self._retryable(verdict[1]):
+                    if restarts >= self.max_restarts or (
+                        asyncio.get_running_loop().time() >= deadline
+                    ):
+                        return await self._finish(
+                            SessionOutcome.NEEDS_ATTENTION, verdict[1], restarts
+                        )
+                    restarts += 1
+                    self._last_retry_detail = verdict[1]
+                    _LOGGER.warning(
+                        "Alarm blocked (%s); retrying (%d/%d)",
+                        verdict[1],
+                        restarts,
+                        self.max_restarts,
+                    )
                     await self._restart_pause(deadline)
                     continue
                 if verdict[0] is SessionOutcome.START_FAILED:
@@ -214,7 +249,7 @@ class AlarmSession:
         except asyncio.CancelledError:
             return SessionOutcome.NEEDS_ATTENTION, "ring_cancelled"
         except Exception as error:
-            return SessionOutcome.START_FAILED, type(error).__name__
+            return SessionOutcome.START_FAILED, f"{type(error).__name__}:{error}"
         outcome = str(getattr(result, "status", None) or getattr(result, "outcome", "") or "")
         detail = str(getattr(result, "detail", "") or "")
         if outcome == "completed":
@@ -227,7 +262,54 @@ class AlarmSession:
             return None
         if outcome == "unsettled":
             return SessionOutcome.NEEDS_ATTENTION, "previous_call_active"
+        if outcome == "blocked":
+            return SessionOutcome.NEEDS_ATTENTION, f"blocked:{detail or 'target_busy'}"
         return SessionOutcome.NEEDS_ATTENTION, f"unexpected_ring_result:{outcome}"
+
+    async def _interaction(self) -> bool | None:
+        """Is somebody talking to the satellite right now?
+
+        ``True`` only for a confirmed dialogue; ``None`` when the satellite state is
+        unreadable or not a boolean. Unknown must never silence the alarm: an
+        unverified state is not evidence that somebody is talking, and an alarm that
+        stops itself because of a stale device state is worse than one that rings
+        while it could have paused.
+        """
+        if self.interaction_active is None:
+            return False
+        try:
+            active = await asyncio.wait_for(self.interaction_active(), timeout=1.0)
+        except Exception as error:
+            self._note(f"interaction_state_unavailable:{type(error).__name__}")
+            return None
+        if isinstance(active, bool):
+            return active
+        self._note("interaction_state_unknown")
+        return None
+
+    def _note(self, warning: str) -> None:
+        if warning not in self._warnings:
+            self._warnings.append(warning)
+
+    @staticmethod
+    def _retryable(detail: str) -> bool:
+        """Is the player merely unavailable right now, or is the alarm itself broken?
+
+        Only availability is retried. A real start failure (missing media, refused
+        service call) must still be reported at once instead of being repeated.
+        """
+        lowered = detail.lower()
+        return any(
+            token in lowered
+            for token in (
+                "blocked",
+                "player_not_idle",
+                "busy",
+                "unavailable",
+                "not_ready",
+                "not ready",
+            )
+        )
 
     async def _supervise(self, ring_task: asyncio.Task, deadline: float) -> str | None:
         """Wait for the ring to end. Returns why it ended early, or None if it ran out."""
@@ -246,12 +328,9 @@ class AlarmSession:
             if ring_task.done():
                 return None
             if self.interaction_active is not None:
-                try:
-                    active = await asyncio.wait_for(self.interaction_active(), timeout=1.0)
-                except Exception:
-                    return "interaction_state_unavailable"
-                if active is not False:
-                    return "interaction_active_or_unknown"
+                active = await self._interaction()
+                if active is True:
+                    return "interaction_active"
             try:
                 state = str(await self.state_of()).lower()
             except Exception as error:
@@ -304,4 +383,9 @@ class AlarmSession:
         return state in IDLE_STATES | {"paused"}
 
     async def _finish(self, outcome: SessionOutcome, detail: str, restarts: int) -> SessionReport:
-        return SessionReport(outcome=outcome, detail=detail, restarts=restarts)
+        return SessionReport(
+            outcome=outcome,
+            detail=detail,
+            restarts=restarts,
+            warnings=tuple(self._warnings),
+        )

@@ -6,7 +6,7 @@ import pytest
 from nabu_core.alarm_engine import AlarmStore
 from nabu_core.devices import DevicePolicy
 from nabu_core.dispatch import SerialDispatcher
-from nabu_core.player import MediaPlayerAdapter, PlaybackStatus
+from nabu_core.player import MediaPlayerAdapter, PlaybackStatus, _Ring
 from nabu_core.scheduler import Scheduler
 
 TARGET = "media_player.alarm_test"
@@ -23,7 +23,7 @@ class PlayerClient:
         self.fail_stop = False
         self.ignore_mute = False
         self.playing = asyncio.Event()
-        self.media_id = None          # Home Assistant reports media_content_id
+        self.media_id = None  # Home Assistant reports media_content_id
 
     async def play_media(self, target, media):
         assert target == TARGET
@@ -319,16 +319,32 @@ class NoIdentityClient:
         return getattr(self._inner, name)
 
 
-async def test_missing_media_identity_must_not_stop_foreign_playback():
-    client = NoIdentityClient()  # media identifier is not exposed by this player
+async def test_missing_media_identity_still_allows_stopping_our_own_alarm():
+    """R09 F-01: an unreadable identifier must not leave the alarm ringing.
+
+    This player exposes no media identifier at all, which is what the target Echo
+    does. R08.1 refused the stop and the alarm kept playing; ownership is now
+    decided by "this adapter started it", not by an identifier the device never
+    reports.
+    """
+    client = NoIdentityClient()
     player = adapter(client, volume=0.3)
     task = asyncio.create_task(player.play(TARGET))
     await asyncio.wait_for(client.playing.wait(), 1)
-    # Another actor may have replaced the alarm without observable identity.
     result = await player.stop(TARGET)
-    assert result.status is not PlaybackStatus.STOPPED_CONFIRMED
-    assert result.detail == "media_identity_unavailable"
+    assert result.status is PlaybackStatus.STOPPED_CONFIRMED
     await task
+    assert client.stops == 1
+
+
+async def test_missing_media_identity_does_not_stop_a_foreign_stream():
+    """Nothing was started here, so an unreadable identity must protect the stream."""
+    client = NoIdentityClient()
+    client._inner.state = "playing"  # somebody else's audio on the target
+    side = MediaPlayerAdapter(client, DevicePolicy(allowed={TARGET}), media=("music", "test.wav"))
+    result = await side._finish(_Ring(target=TARGET))
+    assert result.status is PlaybackStatus.STOP_UNCONFIRMED
+    assert result.detail == "media_identity_unavailable"
     assert client.stops == 0
 
 
