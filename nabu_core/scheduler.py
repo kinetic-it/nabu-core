@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import logging
 import os
 import sqlite3
+import time as _time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -56,6 +58,8 @@ def describe_failure(error: BaseException, limit: int = 200) -> str:
         text = text[: limit - 3].rstrip() + "..."
     return text
 
+
+_LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class Occurrence:
@@ -201,7 +205,11 @@ class Scheduler:
         """A stop in another scheduler process fences this live session too."""
         while True:
             try:
-                if self._current_epoch() != epoch:
+                current = self._current_epoch()
+                if current != epoch:
+                    _LOGGER.warning(
+                        "Nabu stop: session fenced by epoch %s -> %s", epoch, current
+                    )
                     await session.request_stop()
                     return
             except Exception:
@@ -698,6 +706,17 @@ class Scheduler:
     async def stop(self, now: datetime) -> bool:
         """Durably fence due work, then request local adapter stop without claiming silence."""
         now = self._aware_utc(now)
+        started = _time.monotonic()
+        try:
+            epoch_before = self._current_epoch()
+        except Exception:  # noqa: BLE001 - diagnostics only
+            epoch_before = -1
+        _LOGGER.warning(
+            "Nabu stop: enter epoch=%s active=%s session_done=%s",
+            epoch_before,
+            self._active_session is not None,
+            self._session_done is not None,
+        )
         try:
             ids = self._persist_stop(now)
         except Exception:
@@ -719,6 +738,17 @@ class Scheduler:
             confirmed = (await self.dispatcher.stop()) is True
         if confirmed and ids:
             self._mark_stop_confirmed(ids)
+        try:
+            epoch_after = self._current_epoch()
+        except Exception:  # noqa: BLE001 - diagnostics only
+            epoch_after = -1
+        _LOGGER.warning(
+            "Nabu stop: exit confirmed=%s epoch=%s ids=%d elapsed=%.2fs",
+            confirmed,
+            epoch_after,
+            len(ids),
+            _time.monotonic() - started,
+        )
         return confirmed
 
     def _mark_stop_confirmed(self, ids: tuple[str, ...]) -> None:
