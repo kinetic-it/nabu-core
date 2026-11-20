@@ -34,6 +34,26 @@ class VolumeJournal:
         )
         return None if row is None else json.loads(row["value"])
 
+    def pending(self):
+        """Return every target with an unfinished restore record.
+
+        Needed after a restart: the records outlive the process, so somebody has
+        to ask which players may still sit at alarm volume (F-10).
+        """
+        prefix = "volume_recovery:"
+        rows = self.store._run_read(
+            lambda db: db.execute(
+                "SELECT key FROM alarm_metadata WHERE key LIKE ? ORDER BY key",
+                (prefix + "%",),
+            ).fetchall()
+        )
+        targets = []
+        for row in rows:
+            target = str(row["key"])[len(prefix) :]
+            if target.startswith("media_player."):
+                targets.append(target)
+        return targets
+
     def begin(self, target, baseline):
         key, generation = self._key(target), str(uuid4())
         record = {

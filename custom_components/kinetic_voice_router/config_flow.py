@@ -401,9 +401,7 @@ class KineticVoiceRouterOptionsFlow(OptionsFlow):
 
     # --- Nabu-Alarme --------------------------------------------------------------------
 
-    async def async_step_alarms(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_alarms(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Edit the alarm options that no other step exposes.
 
         ``alarm_satellite`` and ``alarm_music_entity`` decide whether the assistant

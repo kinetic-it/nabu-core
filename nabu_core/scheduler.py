@@ -41,6 +41,22 @@ from .player import PlaybackOutcome
 from .recurrence import InvalidLocalOccurrence, next_weekly
 
 
+def describe_failure(error: BaseException, limit: int = 200) -> str:
+    """Return a journal-safe failure description: class name plus one-line message.
+
+    Storing only ``type(error).__name__`` made every post-mortem a guess (F-08:
+    a ring died with ``detail=RuntimeError`` and no reason).  The message is
+    collapsed to a single line and truncated, so an oversized or multi-line
+    message cannot bloat the occurrence table or break its readers.
+    """
+    name = type(error).__name__
+    message = " ".join(str(error).split())
+    text = f"{name}: {message}" if message else name
+    if len(text) > limit:
+        text = text[: limit - 3].rstrip() + "..."
+    return text
+
+
 @dataclass(frozen=True, slots=True)
 class Occurrence:
     """A durable result for one alarm instance at one scheduled UTC instant."""
@@ -825,7 +841,7 @@ class Scheduler:
                     raise
                 except Exception as error:
                     finished.append(
-                        self._finish(occurrence.occurrence_id, "failed", type(error).__name__)
+                        self._finish(occurrence.occurrence_id, "failed", describe_failure(error))
                     )
                     continue
                 if result.status == "completed":

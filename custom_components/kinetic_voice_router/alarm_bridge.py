@@ -96,10 +96,22 @@ DEFAULT_TICK_SECONDS = 20
 class AlarmServiceRegistry:
     """Registers the alarm services against a Home Assistant-like registry."""
 
-    def __init__(self, layer: AlarmServiceLayer, assist_gate=None) -> None:
+    def __init__(self, layer: AlarmServiceLayer, assist_gate=None, adapter=None) -> None:
         self.layer = layer
         self.registered: dict[str, Any] = {}
         self.assist_gate = assist_gate
+        self.adapter = adapter
+
+    async def reconcile_pending_volume(self) -> dict[str, str]:
+        """Finish volume restores that a restart left unconfirmed (F-10).
+
+        Called once per setup. Without it a stop that could not be confirmed
+        before a shutdown stays unanswered: the speaker keeps alarm volume until
+        the next alarm, and that alarm would first have to clear the record.
+        """
+        if self.adapter is None:
+            return {}
+        return await self.adapter.reconcile_all()
 
     def _build(self, name: str):
         method = getattr(self.layer, name)
@@ -260,7 +272,7 @@ def build_alarm_layer(hass, options: Mapping[str, Any]):
     layer = AlarmServiceLayer(
         store, stop_callback=lambda: scheduler.stop(datetime.now(UTC)), scheduler=scheduler
     )
-    return layer, AlarmServiceRegistry(layer, gate)
+    return layer, AlarmServiceRegistry(layer, gate, adapter=adapter)
 
 
 def _pilot_key(name: str) -> str:

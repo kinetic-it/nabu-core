@@ -426,6 +426,28 @@ class MediaPlayerAdapter:
                     "Alarm volume retry failed for %s: %s", target, type(error).__name__
                 )
 
+    async def reconcile_all(self) -> dict[str, str]:
+        """Restore every volume record that outlived the process (F-10).
+
+        ``reconcile_volume`` only runs when the next alarm starts or a stop is
+        retried, so after a Home Assistant restart a speaker could keep the alarm
+        volume indefinitely.  Returns one status per target and never raises:
+        startup must not fail because a single speaker is unreachable.
+        """
+        if self._journal is None:
+            return {}
+        status: dict[str, str] = {}
+        for target in self._journal.pending():
+            try:
+                key = self._policy.check(target)
+            except Exception:  # noqa: BLE001 - unknown or denied targets stay untouched
+                _LOGGER.warning("Alarm volume recovery skipped for %s: not allowlisted", target)
+                status[target] = "skipped"
+                continue
+            await self.reconcile_volume(key)
+            status[target] = "deferred" if key in self._pending_restore else "restored"
+        return status
+
     def prepare_ring(self) -> None:
         """Forget a previous outcome before the dispatcher starts a new generation."""
         self._ring = None

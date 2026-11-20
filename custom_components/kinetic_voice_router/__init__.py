@@ -147,6 +147,13 @@ async def _async_setup_alarm_services(hass: HomeAssistant, entry) -> None:
     _, registry = built
     registry.register(hass)
     layer = built[0]
+    creator = getattr(hass, "async_create_task", None)
+    if creator is not None:
+        # F-10: answer volume restores that a previous shutdown left unconfirmed.
+        try:
+            creator(registry.reconcile_pending_volume())
+        except Exception as error:  # noqa: BLE001 - recovery is never allowed to break setup
+            _LOGGER.warning("Alarm volume recovery not scheduled (%s)", type(error).__name__)
     try:
         interval = float(entry.options.get(CONF_ALARM_TICK_SECONDS, DEFAULT_TICK_SECONDS))
     except (TypeError, ValueError):
