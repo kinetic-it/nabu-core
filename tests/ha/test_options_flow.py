@@ -84,7 +84,14 @@ async def test_options_open_as_menu_with_real_info(hass: FakeHass) -> None:
     entry = await set_up(hass, {CONF_MODE: "observe"})
     menu = await options_flow(hass, entry).async_step_init()
     assert menu["type"] == "menu"
-    assert menu["menu_options"] == ["settings", "connection", "speech_memory", "test", "statistics"]
+    assert menu["menu_options"] == [
+        "settings",
+        "alarms",
+        "connection",
+        "speech_memory",
+        "test",
+        "statistics",
+    ]
     assert menu["description_placeholders"] == {
         "version": INTEGRATION_VERSION,
         "router_version": INTEGRATION_VERSION,

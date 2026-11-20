@@ -148,6 +148,10 @@ class _Ring:
     duck_until: float = 0.0
     duck_active: bool = False
     cleanup: asyncio.Task[PlaybackOutcome] | None = None
+    # Diagnostics for the ring loop: how often a restart stayed unconfirmed and
+    # how often the player reported a state that is neither playing nor idle.
+    restart_failures: int = 0
+    interruptions: int = 0
 
 
 class MediaPlayerAdapter:
@@ -166,9 +170,18 @@ class MediaPlayerAdapter:
         cycle_off: float = 0.0,
         recovery_store=None,
         allow_paused: bool = False,
+        restart_delay: float = 0.5,
+        max_restarts: int = 3,
+        max_interruptions: int = 5,
     ) -> None:
         if not 0 < max_seconds <= 3600:
             raise ValueError("max_seconds must be positive and at most 3600")
+        if not (math.isfinite(restart_delay) and 0 <= restart_delay <= 5):
+            raise ValueError("restart_delay must be finite and between 0 and 5 seconds")
+        if not 1 <= max_restarts <= 10:
+            raise ValueError("max_restarts must be between 1 and 10")
+        if not 1 <= max_interruptions <= 20:
+            raise ValueError("max_interruptions must be between 1 and 20")
         self._client = client
         self._policy = policy
         self._media = media
@@ -178,6 +191,12 @@ class MediaPlayerAdapter:
         self._max_seconds = max_seconds
         self._start_timeout = min(max_seconds, 5.0)
         self._stop_timeout = min(max_seconds, 5.0)
+        # Re-issuing play_media immediately after the player reported idle races
+        # with the tail of the previous stream; a short settle pause plus a small
+        # retry budget keeps a short alarm file audible instead of aborting the ring.
+        self._restart_delay = restart_delay
+        self._max_restarts = max_restarts
+        self._max_interruptions = max_interruptions
         self._stop_requested = asyncio.Event()
         if volume is not None and not 0 <= volume <= 1:
             raise ValueError("volume must be between 0 and 1")
@@ -557,6 +576,52 @@ class MediaPlayerAdapter:
                 ring.target,
             )
 
+    async def _pause_before_restart(self, ring: _Ring) -> None:
+        """Give the player time to close the previous stream before re-issuing."""
+        if self._restart_delay <= 0 or ring.stopping:
+            return
+        try:
+            await asyncio.wait_for(self._stop_requested.wait(), timeout=self._restart_delay)
+        except TimeoutError:
+            pass
+
+    async def _restart_ring(self, ring: _Ring) -> bool:
+        """Restart a running ring.
+
+        A start that is not confirmed within the confirmation window is retried
+        instead of aborting the ring: the media call was accepted, the player can
+        simply be slower than the window (observed on Echo hardware: the state
+        stayed ``playing`` long after the confirmation had given up). Only a
+        rejected media call or a positively foreign medium stays fatal.
+        """
+        for attempt in range(1, self._max_restarts + 1):
+            await self._pause_before_restart(ring)
+            if ring.stopping:
+                return False
+            try:
+                await self._require_start(ring)
+            except RuntimeError as error:
+                detail = str(error)
+                ring.restart_failures = attempt
+                if detail.startswith("play_media failed") or "replaced by other content" in detail:
+                    raise
+                _LOGGER.warning(
+                    "Alarm restart %d/%d not confirmed on %s: %s",
+                    attempt,
+                    self._max_restarts,
+                    ring.target,
+                    detail,
+                )
+                continue
+            ring.restart_failures = 0
+            return True
+        _LOGGER.warning(
+            "Alarm restarts exhausted on %s after %d attempts",
+            ring.target,
+            self._max_restarts,
+        )
+        return False
+
     async def play(self, entity_id: str) -> PlaybackOutcome:
         """Own one alarm ring; perform cleanup exactly once even on cancellation."""
         target = self._policy.check(entity_id)
@@ -599,13 +664,35 @@ class MediaPlayerAdapter:
                 now = loop.time()
                 if ring.stopping or now >= deadline:
                     break
-                state = await self._state(ring.target)
+                try:
+                    state = await self._state(ring.target)
+                except Exception as error:
+                    # A single unreadable poll is not a reason to give up the ring.
+                    state = "unavailable"
+                    _LOGGER.warning(
+                        "Alarm state unreadable on %s: %s", ring.target, type(error).__name__
+                    )
                 if state == "idle" and not self._repeat:
                     return
                 if await self._identify_media(ring) == IDENTITY_FOREIGN:
                     raise RuntimeError("alarm media replaced by other content")
                 if state not in PLAYING_STATES | {"idle"}:
-                    raise RuntimeError("alarm playback interrupted or unavailable")
+                    # Neither playing nor finished: the player dropped out (off,
+                    # unavailable, paused by somebody else). Bounded recovery, then
+                    # an honest failure instead of a silent dead alarm.
+                    ring.interruptions += 1
+                    _LOGGER.warning(
+                        "Alarm playback interruption %d/%d on %s: state=%s",
+                        ring.interruptions,
+                        self._max_interruptions,
+                        ring.target,
+                        state,
+                    )
+                    if ring.interruptions > self._max_interruptions:
+                        raise RuntimeError("alarm playback interrupted or unavailable")
+                    if not await self._restart_ring(ring):
+                        raise RuntimeError("alarm restart after interruption failed")
+                    continue
                 if now < ring.duck_until:
                     continue
                 if ring.duck_active:
@@ -622,7 +709,8 @@ class MediaPlayerAdapter:
                     audible = True
                     phase_end = now + self._cycle_on
                     if not ring.stopping and (self._repeat or state == "idle"):
-                        await self._require_start(ring)
+                        if not await self._restart_ring(ring):
+                            raise RuntimeError("alarm restarts exhausted")
                     continue
                 if self._cycle_off and now >= phase_end:
                     audible = not audible
@@ -633,7 +721,8 @@ class MediaPlayerAdapter:
                         raise RuntimeError("ring phase volume not confirmed")
                     phase_end = now + (self._cycle_on if audible else self._cycle_off)
                 if state == "idle" and self._repeat and audible and not ring.stopping:
-                    await self._require_start(ring)
+                    if not await self._restart_ring(ring):
+                        raise RuntimeError("alarm restarts exhausted")
 
     async def stop_request(self) -> bool:
         """Compatibility helper; only a positively observed stop returns True."""

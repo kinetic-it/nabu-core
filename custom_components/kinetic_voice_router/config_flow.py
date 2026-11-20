@@ -16,6 +16,11 @@ Options ("Konfigurieren") are native Home Assistant flow steps:
 HA forms render the description above the fields and have exactly one button,
 so results get their own menu step and the reset confirmation is a menu with an
 explicit cancel entry.
+
+- alarms:        Nabu alarm options that only exist as entry options
+                 (satellite, music entity, ring length, volume, media). They are
+                 edited here because a hand-edited ``.storage`` file is not a
+                 supported path; every save keeps all other options intact.
 """
 
 from __future__ import annotations
@@ -77,6 +82,24 @@ from .texts import (
 )
 from .voice_router import ROUTER_VERSION, operating_mode, simulate
 from .voice_router.speech_memory import MAX_ENTRIES, Category, Entry, Source
+
+# Nabu alarm options live in ``entry.options`` only (alarm_bridge reads them).
+# Their keys are mirrored here on purpose: config_flow must not import the alarm
+# bridge, so a missing nabu_core package can never break the conversation agent.
+CONF_ALARM_SATELLITE = "alarm_satellite"
+CONF_ALARM_MUSIC = "alarm_music_entity"
+CONF_ALARM_RING_SECONDS = "alarm_ring_seconds"
+CONF_ALARM_VOLUME = "alarm_volume"
+CONF_ALARM_MEDIA = "alarm_media"
+CONF_ALARM_MEDIA_TYPE = "alarm_media_type"
+CONF_ALARM_TARGETS = "alarm_targets"
+
+_RING_SECONDS_MIN = 10
+_RING_SECONDS_MAX = 900
+
+# Options that older releases stored and that no current code reads. They are
+# dropped whenever options are saved; every other key is preserved.
+_OBSOLETE_OPTIONS = frozenset({"router_enabled"})
 
 # Probe result -> form error key (strings.json "config.error").
 _PROBE_ERRORS = {
@@ -260,9 +283,41 @@ class KineticVoiceRouterOptionsFlow(OptionsFlow):
         self._asm_reset_armed = False
         return self.async_show_menu(
             step_id="init",
-            menu_options=["settings", "connection", "speech_memory", "test", "statistics"],
+            menu_options=[
+                "settings",
+                "alarms",
+                "connection",
+                "speech_memory",
+                "test",
+                "statistics",
+            ],
             description_placeholders=self._info(),
         )
+
+    def _options_with(self, **updates: Any) -> dict[str, Any]:
+        """Return the current options with ``updates`` applied.
+
+        Every flow step that stores options has to go through this: an options
+        entry replaces the whole dict, so writing a partial dict silently drops
+        the alarm configuration (database path, targets, pilot name, ring time,
+        volume, media). That defect made the Nabu alarm unusable after a single
+        visit to the settings page.
+
+        Only keys that are documented as obsolete are dropped on the way out.
+        """
+        merged = {
+            key: value
+            for key, value in self.config_entry.options.items()
+            if key not in _OBSOLETE_OPTIONS
+        }
+        merged.update(updates)
+        return merged
+
+    def _alarms_available(self) -> bool:
+        """True when the imported alarm services are configured for this entry."""
+        from .alarm_bridge import CONF_ALARM_DB  # local import: optional dependency
+
+        return bool(self.config_entry.options.get(CONF_ALARM_DB))
 
     # --- Hermes-Verbindung -------------------------------------------------------------
 
@@ -323,10 +378,9 @@ class KineticVoiceRouterOptionsFlow(OptionsFlow):
             # A submission without the field keeps the stored mode.
             mode = user_input.get(CONF_MODE, current)
             if isinstance(mode, str) and mode in MODES:
-                data: dict[str, Any] = {CONF_MODE: mode}
-                if CONF_SPEECH_MEMORY in self.config_entry.options:
-                    data[CONF_SPEECH_MEMORY] = self.config_entry.options[CONF_SPEECH_MEMORY]
-                return self.async_create_entry(title="", data=data)
+                return self.async_create_entry(
+                    title="", data=self._options_with(**{CONF_MODE: mode})
+                )
             errors["base"] = "invalid_mode"
         return self.async_show_form(
             step_id="settings",
@@ -343,6 +397,108 @@ class KineticVoiceRouterOptionsFlow(OptionsFlow):
             ),
             errors=errors,
             description_placeholders={"mode": self._info()["mode"]},
+        )
+
+    # --- Nabu-Alarme --------------------------------------------------------------------
+
+    async def async_step_alarms(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Edit the alarm options that no other step exposes.
+
+        ``alarm_satellite`` and ``alarm_music_entity`` decide whether the assistant
+        may interrupt a running alarm, whether snooze is available and whether the
+        ring length is bounded by a session. They were read by the alarm bridge but
+        never offered in a flow, so the whole session path was unreachable in a real
+        installation.
+        """
+        if not self._alarms_available():
+            return self.async_abort(reason="alarms_not_configured")
+
+        options = self.config_entry.options
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            satellite = user_input.get(CONF_ALARM_SATELLITE) or None
+            music = user_input.get(CONF_ALARM_MUSIC) or None
+            if isinstance(music, str):
+                music = music.strip().lower() or None
+            targets = tuple(options.get(CONF_ALARM_TARGETS) or ())
+            if music is not None and music not in targets:
+                # alarm_bridge rejects this combination at setup; catch it here
+                # instead of breaking the integration on the next reload.
+                errors["base"] = "music_not_a_target"
+            else:
+                updates: dict[str, Any] = {
+                    CONF_ALARM_SATELLITE: satellite,
+                    CONF_ALARM_MUSIC: music,
+                }
+                ring_seconds = user_input.get(CONF_ALARM_RING_SECONDS)
+                if ring_seconds is not None:
+                    updates[CONF_ALARM_RING_SECONDS] = int(ring_seconds)
+                volume = user_input.get(CONF_ALARM_VOLUME)
+                if volume is not None:
+                    updates[CONF_ALARM_VOLUME] = round(float(volume), 3)
+                media = user_input.get(CONF_ALARM_MEDIA)
+                if isinstance(media, str) and media.strip():
+                    updates[CONF_ALARM_MEDIA] = media.strip()
+                media_type = user_input.get(CONF_ALARM_MEDIA_TYPE)
+                if isinstance(media_type, str) and media_type.strip():
+                    updates[CONF_ALARM_MEDIA_TYPE] = media_type.strip()
+                return self.async_create_entry(title="", data=self._options_with(**updates))
+
+        return self.async_show_form(
+            step_id="alarms",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_ALARM_SATELLITE,
+                        description={"suggested_value": options.get(CONF_ALARM_SATELLITE)},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="assist_satellite")
+                    ),
+                    vol.Optional(
+                        CONF_ALARM_MUSIC,
+                        description={"suggested_value": options.get(CONF_ALARM_MUSIC)},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="media_player")
+                    ),
+                    vol.Optional(
+                        CONF_ALARM_RING_SECONDS,
+                        default=options.get(CONF_ALARM_RING_SECONDS, 120),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=_RING_SECONDS_MIN,
+                            max=_RING_SECONDS_MAX,
+                            step=5,
+                            unit_of_measurement="s",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_ALARM_VOLUME,
+                        default=options.get(CONF_ALARM_VOLUME, 1.0),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=1,
+                            step=0.05,
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_ALARM_MEDIA,
+                        default=options.get(CONF_ALARM_MEDIA) or "",
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        CONF_ALARM_MEDIA_TYPE,
+                        default=options.get(CONF_ALARM_MEDIA_TYPE) or "",
+                    ): selector.TextSelector(),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "targets": ", ".join(options.get(CONF_ALARM_TARGETS) or ()) or "-",
+            },
         )
 
     # --- Adaptive Speech Memory (Sprachwörterbuch) ---------------------------------------
@@ -395,7 +551,7 @@ class KineticVoiceRouterOptionsFlow(OptionsFlow):
             enabled = user_input.get(CONF_SPEECH_MEMORY) is True
             return self.async_create_entry(
                 title="",
-                data={CONF_MODE: self._mode(), CONF_SPEECH_MEMORY: enabled},
+                data=self._options_with(**{CONF_SPEECH_MEMORY: enabled}),
             )
         return self.async_show_form(
             step_id="speech_memory_toggle",

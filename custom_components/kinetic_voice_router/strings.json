@@ -69,7 +69,8 @@
           "connection": "Hermes connection",
           "speech_memory": "Speech memory",
           "test": "Test request",
-          "statistics": "Runtime statistics"
+          "statistics": "Runtime statistics",
+          "alarms": "Alarms"
         },
         "menu_option_descriptions": {
           "settings": "Off, Observe or Active",
@@ -216,6 +217,27 @@
           "reset_execute": "Reset counters",
           "statistics": "Cancel"
         }
+      },
+      "alarms": {
+        "title": "Alarm options",
+        "description": "Options for the local alarm. Allowlisted targets: {targets}.",
+        "data": {
+          "alarm_satellite": "Assist satellite",
+          "alarm_music_entity": "Music player",
+          "alarm_ring_seconds": "Ring duration",
+          "alarm_volume": "Alarm volume",
+          "alarm_media": "Alarm media",
+          "alarm_media_type": "Media type"
+        },
+        "data_description": {
+          "alarm_satellite": "Enables speech interruption, snooze and the bounded ring duration. Leave empty to disable the session path.",
+          "alarm_music_entity": "Must be an allowlisted target. Leave empty when no music should be paused.",
+          "alarm_ring_seconds": "10 to 900 seconds.",
+          "alarm_volume": "0.0 to 1.0.",
+          "alarm_media": "For example media-source://media_source/local/alarm.wav",
+          "alarm_media_type": "For example audio/wav or music."
+        },
+        "submit": "Save alarm options"
       }
     },
     "error": {
@@ -229,7 +251,11 @@
       "asm_chain": "This would create a chain or loop with an existing entry.",
       "asm_full": "The speech memory is full. Delete entries first.",
       "asm_unknown_entry": "This entry no longer exists.",
-      "asm_read_only": "The stored dictionary is locked because it could not be read. Reset it first."
+      "asm_read_only": "The stored dictionary is locked because it could not be read. Reset it first.",
+      "music_not_a_target": "The music player must be an allowlisted alarm target."
+    },
+    "abort": {
+      "alarms_not_configured": "No alarm services are configured for this entry."
     }
   },
   "selector": {

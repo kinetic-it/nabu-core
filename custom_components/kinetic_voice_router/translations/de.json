@@ -69,7 +69,8 @@
           "connection": "Hermes-Verbindung",
           "speech_memory": "Sprachwörterbuch",
           "test": "Testanfrage",
-          "statistics": "Laufzeitstatistik"
+          "statistics": "Laufzeitstatistik",
+          "alarms": "Wecker"
         },
         "menu_option_descriptions": {
           "settings": "Aus, Beobachten oder Aktiv",
@@ -216,6 +217,27 @@
           "reset_execute": "Zähler zurücksetzen",
           "statistics": "Abbrechen"
         }
+      },
+      "alarms": {
+        "title": "Wecker-Optionen",
+        "description": "Diese Optionen gehören zum lokalen Wecker. Erlaubte Ziele: {targets}.",
+        "data": {
+          "alarm_satellite": "Assist-Satellit",
+          "alarm_music_entity": "Musik-Player",
+          "alarm_ring_seconds": "Klingeldauer",
+          "alarm_volume": "Wecklautstärke",
+          "alarm_media": "Alarmdatei",
+          "alarm_media_type": "Medientyp"
+        },
+        "data_description": {
+          "alarm_satellite": "Aktiviert Sprachunterbrechung, Snooze und die begrenzte Klingeldauer. Leer lassen schaltet den Session-Pfad ab.",
+          "alarm_music_entity": "Muss ein erlaubtes Ziel sein. Leer lassen, wenn keine Musik pausiert werden soll.",
+          "alarm_ring_seconds": "10 bis 900 Sekunden.",
+          "alarm_volume": "0,0 bis 1,0.",
+          "alarm_media": "Zum Beispiel media-source://media_source/local/wecker.wav",
+          "alarm_media_type": "Zum Beispiel audio/wav oder music."
+        },
+        "submit": "Wecker speichern"
       }
     },
     "error": {
@@ -229,7 +251,11 @@
       "asm_chain": "Das würde mit einem vorhandenen Eintrag eine Kette oder Schleife bilden.",
       "asm_full": "Das Sprachwörterbuch ist voll. Lösche zuerst Einträge.",
       "asm_unknown_entry": "Diesen Eintrag gibt es nicht mehr.",
-      "asm_read_only": "Das gespeicherte Wörterbuch ist gesperrt, weil es nicht gelesen werden konnte. Setze es zuerst zurück."
+      "asm_read_only": "Das gespeicherte Wörterbuch ist gesperrt, weil es nicht gelesen werden konnte. Setze es zuerst zurück.",
+      "music_not_a_target": "Der Musik-Player muss ein erlaubtes Weckerziel sein."
+    },
+    "abort": {
+      "alarms_not_configured": "Für diesen Eintrag sind keine Wecker-Dienste eingerichtet."
     }
   },
   "selector": {

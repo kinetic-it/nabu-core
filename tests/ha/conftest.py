@@ -234,6 +234,48 @@ class BooleanSelector:
         return value
 
 
+class NumberSelectorMode(StrEnum):
+    BOX = "box"
+    SLIDER = "slider"
+
+
+class EntitySelector:
+    """Contract stub for selector.EntitySelector: validates the entity domain."""
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self.config = config or {}
+
+    def __call__(self, value: Any) -> str:
+        if not isinstance(value, str) or "." not in value:
+            raise ValueError("not an entity id")
+        domain = self.config.get("domain")
+        if domain and not value.startswith(f"{domain}."):
+            raise ValueError("wrong entity domain")
+        return value
+
+
+class NumberSelector:
+    """Contract stub for selector.NumberSelector: enforces min/max like HA does."""
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self.config = config or {}
+
+    def __call__(self, value: Any) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("not a number")
+        minimum = self.config.get("min")
+        maximum = self.config.get("max")
+        if minimum is not None and value < minimum:
+            raise ValueError("below minimum")
+        if maximum is not None and value > maximum:
+            raise ValueError("above maximum")
+        return float(value)
+
+
+def _selector_config(**kwargs: Any) -> dict[str, Any]:
+    return dict(kwargs)
+
+
 selector.SelectSelectorMode = SelectSelectorMode
 selector.SelectSelectorConfig = dict
 selector.SelectSelector = SelectSelector
@@ -247,6 +289,11 @@ def _text_config(**kwargs: Any) -> dict[str, Any]:
 selector.TextSelectorConfig = _text_config
 selector.TextSelector = TextSelector
 selector.BooleanSelector = BooleanSelector
+selector.EntitySelectorConfig = _selector_config
+selector.EntitySelector = EntitySelector
+selector.NumberSelectorMode = NumberSelectorMode
+selector.NumberSelectorConfig = _selector_config
+selector.NumberSelector = NumberSelector
 
 
 # --- config entries and flows -----------------------------------------------------------

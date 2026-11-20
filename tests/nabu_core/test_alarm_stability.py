@@ -191,15 +191,19 @@ async def test_unreachable_cleanup_retries_only_after_idle_without_playing(caplo
     player = adapter(client, volume=0.3)
     task = asyncio.create_task(player.play(TARGET))
     await asyncio.wait_for(client.playing.wait(), 1)
+    # The player drops out for good: the ring recovers by re-issuing the media,
+    # so the outage has to reject the play as well to model "unreachable".
     client.state = "unavailable"
-    with pytest.raises(RuntimeError, match="interrupted or unavailable"):
+    client.fail_play = True
+    with pytest.raises(RuntimeError):
         await task
     assert client.volume == 0.3
     assert "restore deferred" in caplog.text
     client.state = "idle"
+    client.fail_play = False
     await player.reconcile_volume(TARGET)
     assert client.volume == 0.5
-    assert client.plays == 1
+    assert client.plays >= 1
     assert client.stops == 1
 
 
@@ -366,7 +370,10 @@ async def test_pending_volume_recovery_survives_adapter_restart(tmp_path):
     )
     task = asyncio.create_task(player.play(TARGET))
     await asyncio.wait_for(client.playing.wait(), 1)
+    # Rejected play: a single dropped state poll is now recovered by re-issuing the
+    # media, so an unreachable player has to refuse the call as well.
     client.state = "unavailable"
+    client.fail_play = True
     with pytest.raises(RuntimeError):
         await task
     replacement = MediaPlayerAdapter(
