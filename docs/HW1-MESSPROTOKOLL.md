@@ -1,8 +1,8 @@
-# WI-0181 · H-W1 — Messprotokoll Wakeword während des Klingelns
+# [internal-issue] · H-W1 — Messprotokoll Wakeword während des Klingelns
 
 Vorgang: `WI0181-NABU-HW1-WAKEWORD-R01`
-Gerät: Wohnzimmer-Echo 2 (`radar`, `192.168.178.42`), Firmware `2026.11.18.004106`, unverändert.
-Arbeitsbaum: `/home/nexis/work/nabu-core-r07a` (Werkstatt VM205, `nexis`).
+Gerät: Wohnzimmer-Echo 2 (`radar`, `[private-address]`), Firmware `2026.11.18.004106`, unverändert.
+Arbeitsbaum: `/home/[private-host]/work/nabu-core-r07a` ([private-host] [private-host], `[private-host]`).
 Küchendot, R6 und P0 sind ausgeschlossen.
 
 Ziel: getrennt messen, wie oft (1) das Wakeword erkannt wird, (2) die Pipeline startet,
@@ -32,7 +32,7 @@ zur Verfügung; das ist eine eigene, reversible Entscheidung (siehe Abschnitt 7)
 
 - Datei: `assets/hw1/bell-4-3.wav` — 30 s, 4 s Ton / 3 s Pause, 880 Hz sinus, 48 kHz mono,
   erzeugt mit `tools/hw1/make_bell.py` (keine Sprache, damit STT nichts als Befehl hört).
-- Auslieferung: `tools/hw1/serve_alarm.py` auf Werkstatt (`192.168.0.58:8085`), Protokoll
+- Auslieferung: `tools/hw1/serve_alarm.py` auf [private-host] (`[private-address]:8085`), Protokoll
   jeder Anfrage in `hw1-fetch.jsonl`.
 - Warum überhaupt ein eigener Server: Das Gerät holt die Mediendatei selbst. Der Zugriffslog
   ist der einzige harte Beleg, dass der Echo die Datei wirklich geladen hat — „HA hat
@@ -57,7 +57,7 @@ Kein automatischer Beginn der nächsten Reihe.
 
 1. Vorzustand festhalten: Satellit `idle`, Medienplayer `idle`, Lautstärke, kein fremder Stream.
 2. Server läuft, Datei erreichbar (S0 einmal bestätigt).
-3. Alarm starten: `media_player.play_media` mit `http://192.168.0.58:8085/bell-4-3.wav`,
+3. Alarm starten: `media_player.play_media` mit `http://[private-address]:8085/bell-4-3.wav`,
    Inhaltstyp `music`, Lautstärke der Reihe.
 4. Arusha spricht **„Okay Nabu“**, danach **„Stopp“**.
 5. Nach spätestens 25 s: `media_player.media_stop`, Lautstärke zurück auf Vorzustand.
@@ -89,7 +89,7 @@ Felder: `wakeword`, `pipeline`, `transkript`, `stopp` (je `ja|nein|unklar`), `st
 **Manueller Notstopp** (in dieser Reihenfolge):
 1. `media_player.media_stop` auf `media_player.echo_2_c2709b_media_player`
 2. `media_player.volume_set` auf den Ausgangswert
-3. Server auf Werkstatt beenden (`Ctrl-C` bzw. Prozess beenden)
+3. Server auf [private-host] beenden (`Ctrl-C` bzw. Prozess beenden)
 4. Wenn HA nicht mehr reagiert: `button.echo_2_c2709b_restart` (Geräteneustart, keine Firmwareänderung)
 
 ## 7. Offene Punkte vor dem ersten Ton
@@ -106,4 +106,4 @@ Felder: `wakeword`, `pipeline`, `transkript`, `stopp` (je `ja|nein|unklar`), `st
 - Kein Firmwareeingriff, kein OTA, kein R6.
 - Auto-Update-Automatik bleibt aus; sie wird erst nach Abschluss der Messungen bewusst
   entschieden.
-- Server und Protokolldateien liegen unter Werkstatt/`tools`+`assets`; Löschen genügt.
+- Server und Protokolldateien liegen unter [private-host]/`tools`+`assets`; Löschen genügt.

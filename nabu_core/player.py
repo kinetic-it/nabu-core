@@ -11,10 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
-from urllib.parse import unquote
 
 from .devices import DevicePolicy
 from .volume_journal import VolumeJournal
@@ -28,6 +28,18 @@ MEDIA_PREFIXES = ("media-source://", "media-source:/", "media_source://")
 IDENTITY_MATCH = "match"
 IDENTITY_FOREIGN = "foreign"
 IDENTITY_UNKNOWN = "unknown"
+
+
+_PERCENT_BYTES = re.compile(r"(?:%[0-9a-fA-F]{2})+")
+
+
+def _decode_media_escapes(value: str) -> str:
+    """Decode percent-encoded UTF-8 bytes without importing network modules."""
+
+    def decode(match: re.Match[str]) -> str:
+        return bytes.fromhex(match.group().replace("%", "")).decode("utf-8", "replace")
+
+    return _PERCENT_BYTES.sub(decode, value)
 
 
 def normalise_media_id(value: object) -> str | None:
@@ -44,7 +56,7 @@ def normalise_media_id(value: object) -> str | None:
     if not text:
         return None
     for _ in range(2):  # tolerate double percent-encoding
-        decoded = unquote(text)
+        decoded = _decode_media_escapes(text)
         if decoded == text:
             break
         text = decoded

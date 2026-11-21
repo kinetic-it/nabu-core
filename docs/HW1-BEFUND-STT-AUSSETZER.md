@@ -52,7 +52,7 @@ Zwei Fehlerbilder, zwei Ursachen:
 - **OFFEN:** Welche STT-Engine im Betrieb tatsächlich antwortet (Cloud vs. lokal) — für
   die Ursachensuche von F2 entscheidend, ohne Debug-Log der STT-Komponente nicht belegt.
 
-## 4. Warum das für WI-0181 zählt
+## 4. Warum das für [internal-issue] zählt
 
 Ein Sprachstopp, der am VAD-Fenster oder an einem STT-Aussetzer scheitert, sieht im
 Feld genauso aus wie „Wakeword bei Alarm nicht erkannt". Ohne diese Trennung würde die

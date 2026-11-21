@@ -90,5 +90,8 @@ async def test_restart_does_not_override_foreign_media(tmp_path):
     await new.tick(now)
     assert calls == []
     assert new.occurrences()[0].status == "in_flight"
-    await new.tick(now + timedelta(days=1))
+    deadline = store._run_read(
+        lambda db: db.execute("SELECT deadline FROM alarm_sessions").fetchone()[0]
+    )
+    await new.tick(datetime.fromisoformat(deadline) + timedelta(seconds=1))
     assert new.occurrences()[0].status == "interrupted"

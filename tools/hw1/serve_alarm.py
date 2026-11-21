@@ -94,7 +94,7 @@ def main() -> None:
         server.allow_reuse_address = True
         server.file_path = args.file
         server.allowed_path = allowed
-        print(f"serving {args.file} at http://<werkstatt-ip>:{args.port}{allowed} for {args.seconds}s", flush=True)
+        print(f"serving {args.file} at http://<host-ip>:{args.port}{allowed} for {args.seconds}s", flush=True)
         timer = threading.Timer(args.seconds, server.shutdown)
         timer.daemon = True
         timer.start()

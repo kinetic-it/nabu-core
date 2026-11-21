@@ -149,9 +149,12 @@ class AlarmSession:
                             SessionOutcome.RANG_OUT, "ring_seconds_elapsed", restarts
                         )
                     if restarts >= self.max_restarts:
+                        _LOGGER.warning(
+                            "Alarm restarts exhausted (%s) after %d attempts", reason, restarts
+                        )
                         return await self._finish(SessionOutcome.NEEDS_ATTENTION, reason, restarts)
                     restarts += 1
-                    _LOGGER.warning(
+                    _LOGGER.info(
                         "Alarm ring ended early (%s); restarting (%d/%d)",
                         reason,
                         restarts,
