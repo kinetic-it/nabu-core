@@ -220,8 +220,10 @@ async def test_stop_callback_false_only_acknowledges_the_abort_request(tmp_path)
     )
 
     assert result.code == "STOP_REQUESTED"
-    assert result.confirmation == "Abbruch des Weckers wurde angefordert."
-    assert result.confirmation != "Wecker wurde gestoppt."
+    # R18: ein unbestaetigter Stopp darf nicht wie Stille klingen.
+    assert result.confirmation is not None
+    assert "nicht bestätigt" in result.confirmation
+    assert result.confirmation != "Wecker gestoppt."
 
 
 async def test_delete_label_fails_closed_when_slot_is_reused_before_mutation(tmp_path):
@@ -333,4 +335,5 @@ async def test_adapter_ack_does_not_prove_physical_silence(tmp_path):
         "Stopp den Wecker", now=NOW
     )
     assert result.code == "STOP_REQUESTED"
-    assert result.confirmation == "Abbruch des Weckers wurde angefordert."
+    # R18: True ist die Bestaetigung der Session, nicht die des Adapters.
+    assert result.confirmation == "Wecker gestoppt."

@@ -395,20 +395,134 @@ def _normalise(text: str) -> str:
     return " ".join(re.sub(r"[?!.,]", " ", joined).split())
 
 
-_STOP_PHRASES: Final[frozenset[str]] = frozenset(
+#: Words a speaker (or the speech recogniser) may put around a stop command.
+#: They carry no meaning here and must not hide the command: "Oh, Stopp." and
+#: "Okay, stopp bitte" are the same request as "Stopp".
+_STOP_FILLERS: Final[frozenset[str]] = frozenset(
+    {
+        "oh",
+        "o",
+        "ohh",
+        "ooh",
+        "ah",
+        "ahh",
+        "eh",
+        "äh",
+        "ähm",
+        "ehm",
+        "hm",
+        "hmm",
+        "hey",
+        "hej",
+        "hallo",
+        "ok",
+        "okay",
+        "also",
+        "na",
+        "nu",
+        "so",
+        "bitte",
+        "doch",
+        "mal",
+        "jetzt",
+        "schnell",
+        "sofort",
+        "endlich",
+        "verdammt",
+        "man",
+        "du",
+        "mir",
+        "jarvis",
+        "assistent",
+        "liebes",
+    }
+)
+
+#: Short stop verbs. Alone they may belong to music, a vacuum or anything else,
+#: so they are acted on only while an alarm is actually ringing.
+_STOP_SHORT: Final[frozenset[str]] = frozenset(
+    {
+        "stopp",
+        "stop",
+        "stoppe",
+        "stoppt",
+        "halt",
+        "halte",
+        "ruhe",
+        "still",
+        "ende",
+        "aus",
+        "genug",
+        "schluss",
+    }
+)
+
+#: Stop commands that name the alarm themselves - unambiguous on their own.
+_STOP_ALARM_PHRASES: Final[frozenset[str]] = frozenset(
     {
         "stopp den wecker",
         "stop den wecker",
-        "stoppe den wecker",
         "nabu stopp",
         "nabu stop",
+        "stoppe den wecker",
         "wecker aus",
+        "wecker stopp",
+        "wecker stop",
+        "wecker ausmachen",
+        "mach den wecker aus",
+        "alarm aus",
+        "alarm stopp",
+        "klingel aus",
+        "klingeln aus",
+        "klingel abstellen",
+        "klingeln abstellen",
         "hör auf zu klingeln",
         "hoer auf zu klingeln",
-        "stopp",
-        "stop",
+        "hör auf",
+        "hoer auf",
+        "aufhören",
+        "aufhoeren",
+        "sei still",
+        "ende jetzt",
     }
 )
+
+#: Negations turn a stop into "keep ringing" ("hör nicht auf", "stopp nicht").
+_STOP_NEGATIONS: Final[frozenset[str]] = frozenset(
+    {"nicht", "net", "ned", "kein", "keine", "niemals", "nie"}
+)
+
+
+def _without_fillers(text: str) -> str:
+    return " ".join(token for token in text.split() if token not in _STOP_FILLERS)
+
+
+def match_stop(utterance: str) -> str | None:
+    """Classify a stop command as ``"alarm"``, ``"generic"`` or ``None``.
+
+    Only a *pure* stop command matches. An unrelated sentence that merely
+    contains a stop word - "ich muss aufhören zu rauchen", "wie stoppe ich den
+    Wecker" - must never silence an alarm, therefore the remaining words have to
+    equal a known stop form exactly.
+    """
+
+    if not isinstance(utterance, str):
+        return None
+    text = _normalise(utterance)
+    if not text:
+        return None
+    tokens = text.split()
+    if _STOP_NEGATIONS.intersection(tokens):
+        return None
+    core = _without_fillers(text)
+    if not core:
+        return None
+    if core in _STOP_SHORT:
+        return "generic"
+    if core in _STOP_ALARM_PHRASES:
+        return "alarm"
+    return None
+
 
 _LIST_PHRASES: Final[frozenset[str]] = frozenset(
     {
@@ -423,18 +537,20 @@ _LIST_PHRASES: Final[frozenset[str]] = frozenset(
 )
 
 
-#: A bare "stopp" is not an alarm command on its own - it could belong to music,
-#: a vacuum or anything else. It only reaches the alarm engine while one rings.
-_GENERIC_STOP_PHRASES: Final[frozenset[str]] = frozenset({"stopp", "stop"})
-
-
 def is_generic_stop(utterance: str) -> bool:
     """Whether this is a bare stop word without an alarm reference."""
-    return _normalise(utterance) in _GENERIC_STOP_PHRASES
+
+    return match_stop(utterance) == "generic"
+
+
+def is_stop_utterance(utterance: str) -> bool:
+    """Whether the utterance is purely a stop command, named or bare."""
+
+    return match_stop(utterance) is not None
 
 
 def _is_stop(text: str) -> bool:
-    return text in _STOP_PHRASES
+    return match_stop(text) is not None
 
 
 def _is_list(text: str) -> bool:

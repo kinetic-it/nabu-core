@@ -65,6 +65,7 @@ _ALARM_REPLIES = {
     "NOT_FOUND": "Diesen Wecker kenne ich nicht.",
     "AMBIGUOUS_SELECTOR": "Mehrere Wecker passen. Welchen meinst du?",
     "STOP_FAILED": "Der Wecker ließ sich nicht stoppen.",
+    "NOT_RINGING": "Es klingelt gerade kein Wecker.",
     "INVALID_INTENT": "Das habe ich nicht verstanden.",
     "NO_TARGET": "Es ist kein Ausgabegerät freigegeben.",
 }
@@ -72,6 +73,36 @@ _ALARM_REPLIES = {
 HERMES_FAILED = "Hermes Agent could not process the request."
 # Errors the router treats as an answer-level failure of the Hermes call.
 _HERMES_ERRORS = (HermesError, TypeError, ValueError)
+
+
+async def _stop_reply(text: str, voice) -> tuple[bool, str | None]:
+    """Answer a stop command before any other alarm or chat logic.
+
+    Returns ``(handled, reply)``. ``handled`` with ``reply is None`` means the
+    utterance is a bare stop outside a ring and therefore belongs to the chat
+    agent (music, vacuum, ...). Nothing here touches another device: the silence
+    request goes to the session that is actually ringing.
+    """
+    from datetime import UTC, datetime
+
+    from .nabu_core.voice_alarm import match_stop
+
+    kind = match_stop(text)
+    if kind is None:
+        return False, None
+    if kind == "generic" and not voice.is_ringing():
+        # A bare "stopp" without a ring belongs to the rest of the house.
+        return True, None
+    try:
+        result = await voice.handle(text, now=datetime.now(UTC))
+    except Exception as err:  # noqa: BLE001 - the answer path must survive
+        _LOGGER.warning("Alarm stop path failed (%s)", type(err).__name__)
+        return True, _ALARM_REPLIES["STOP_FAILED"]
+    if result.question:
+        return True, result.question
+    if result.confirmation:
+        return True, result.confirmation
+    return True, _ALARM_REPLIES["STOP_FAILED"]
 
 
 async def async_setup_entry(
@@ -237,7 +268,7 @@ class KineticVoiceRouterConversationEntity(conversation.ConversationEntity):
         """
         from datetime import UTC, datetime
 
-        from .nabu_core.voice_alarm import is_generic_stop, merge_clarification
+        from .nabu_core.voice_alarm import merge_clarification
 
         registry = self.hass.data.get(_ALARM_REGISTRY_KEY)
         if registry is None:
@@ -248,16 +279,21 @@ class KineticVoiceRouterConversationEntity(conversation.ConversationEntity):
 
         session = getattr(user_input, "conversation_id", None) or "default"
         text = user_input.text
+
+        # 0. A stop command wins over every other alarm handling. While a ring is
+        #    active the user must never have to argue with a clarification, a
+        #    learning proposal or a confirmation question, and a stale pending
+        #    question must not swallow the stop.
+        stopped, stop_reply = await _stop_reply(text, voice)
+        if stopped:
+            self._alarm_pending.pop(session, None)
+            return stop_reply
+
         pending = self._alarm_pending.pop(session, None)
         if pending is not None:
             merged = merge_clarification(pending[0], pending[1], text)
             if merged is not None:
                 text = merged
-
-        # A bare "stopp" belongs to us only while an alarm is ringing; otherwise
-        # it must reach the agent so music or other players stay unaffected.
-        if is_generic_stop(text) and not voice.is_ringing():
-            return None
 
         parsed = voice.parser.parse(text, now=datetime.now(UTC))
         # Compare the value, not the enum: a stale bundled copy would otherwise

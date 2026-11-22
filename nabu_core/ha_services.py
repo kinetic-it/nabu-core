@@ -125,7 +125,9 @@ class AlarmServiceLayer:
         self.voice = VoiceAlarmAdapter(
             self.service,
             stop_callback=self._voice_stop,
-            ringing_callback=self._voice_ringing,
+            # Without a scheduler the ringing state is unknown, not "silent":
+            # the adapter must not turn that into a refusal.
+            ringing_callback=self._voice_ringing if self.scheduler is not None else None,
             snooze_callback=self._voice_snooze,
         )
 
@@ -146,7 +148,13 @@ class AlarmServiceLayer:
             return _failure(error)
         return ServiceResult(
             ok=result.code
-            in {"OK", "STOP_REQUESTED", "SNOOZE_REQUESTED", "CLARIFICATION_REQUIRED"},
+            in {
+                "OK",
+                "STOP_REQUESTED",
+                "NOT_RINGING",
+                "SNOOZE_REQUESTED",
+                "CLARIFICATION_REQUIRED",
+            },
             code=result.code,
             data={
                 "confirmation": result.confirmation,
@@ -159,9 +167,13 @@ class AlarmServiceLayer:
     def _voice_ringing(self) -> bool:
         return bool(self.scheduler is not None and self.scheduler.is_ringing())
 
-    async def _voice_stop(self) -> bool:
+    async def _voice_stop(self) -> bool | None:
         if self.stop_callback is None:
             raise RuntimeError("stop is not wired")
+        if self.scheduler is not None and not self.scheduler.is_ringing():
+            # Nothing is ringing: do not touch any player at all, and let the
+            # caller answer honestly instead of pretending a stop happened.
+            return None
         result = await self.stop()
         if not result.ok:
             raise RuntimeError(result.code)

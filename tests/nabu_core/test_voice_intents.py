@@ -176,7 +176,20 @@ async def test_stop_asks_the_scheduler_and_never_claims_silence(tmp_path):
 
     assert calls == [True]
     assert result.code == "STOP_REQUESTED"
-    assert "angefordert" in result.confirmation
+    assert result.confirmation == "Wecker gestoppt."
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_stop_does_not_sound_like_silence(tmp_path):
+    async def stop():
+        return False
+
+    adapter = make_adapter(tmp_path, stop=stop)
+
+    result = await say(adapter, "Nabu, stopp.")
+
+    assert result.code == "STOP_REQUESTED"
+    assert "nicht bestätigt" in result.confirmation
 
 
 # --- ambiguity -------------------------------------------------------------
@@ -284,17 +297,21 @@ def test_the_trigger_sentence_that_failed_in_the_pipeline_is_understood():
 
 
 # --- stop is contextual ----------------------------------------------------
-@pytest.mark.parametrize("utterance", ["Nabu, stopp.", "Wecker aus.", "Hör auf zu klingeln."])
+@pytest.mark.parametrize(
+    "utterance", ["Nabu, stopp.", "Wecker aus.", "Hör auf zu klingeln.", "Stopp den Wecker."]
+)
 def test_an_explicit_alarm_stop_is_never_generic(utterance):
     from nabu_core.voice_alarm import is_generic_stop
 
     assert is_generic_stop(utterance) is False
 
 
-@pytest.mark.parametrize("utterance", ["stopp", "Stop.", "  stopp  "])
+@pytest.mark.parametrize("utterance", ["stopp", "Stop.", "  stopp  ", "Oh, Stopp."])
 def test_a_bare_stop_word_is_generic(utterance):
     from nabu_core.voice_alarm import is_generic_stop
 
+    # R18: Ein Fuellwort vor dem Stopp macht ihn nicht zum Weckerbefehl; er wirkt
+    # nur, solange ein Wecker klingelt.
     assert is_generic_stop(utterance) is True
 
 

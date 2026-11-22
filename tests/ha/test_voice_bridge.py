@@ -144,7 +144,23 @@ async def test_stop_is_forwarded_and_never_promised_as_silence(tmp_path):
     reply = await run(stub, "Nabu, stopp.")
 
     assert calls == [True]
-    assert reply == "Abbruch des Weckers wurde angefordert."
+    # R18: bestaetigter Stopp heisst "gestoppt"; unbestaetigt heisst "nicht bestaetigt".
+    assert reply == "Wecker gestoppt."
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_stop_never_promises_silence(tmp_path):
+    async def stopped():
+        return False
+
+    _, registry = build_voice(tmp_path, stopped=stopped)
+    stub = Stub(registry)
+
+    reply = await run(stub, "Nabu, stopp.")
+
+    assert reply is not None
+    assert "nicht bestätigt" in reply
+    assert "gestoppt." not in reply
 
 
 @pytest.mark.asyncio
@@ -177,4 +193,5 @@ async def test_an_explicit_alarm_stop_still_works_without_ringing(tmp_path):
     reply = await run(stub, "Nabu, stopp.")
 
     assert calls == [True]
-    assert reply == "Abbruch des Weckers wurde angefordert."
+    # R18: Die Antwort nennt nur, was die Session bestaetigt hat.
+    assert reply == "Wecker gestoppt."

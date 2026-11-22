@@ -452,15 +452,28 @@ class VoiceAlarmAdapter:
     async def _stop(self) -> ApiResult:
         if self.stop_callback is None:
             return ApiResult(code="NOT_IMPLEMENTED")
+        # When the ringing state is known, a stop outside a ring must not touch
+        # any player: answering "nothing is ringing" is the honest result.
+        if self.ringing_callback is not None and not self.is_ringing():
+            return ApiResult(
+                code="NOT_RINGING",
+                confirmation="Es klingelt gerade kein Wecker.",
+            )
         try:
-            await self.stop_callback()
+            confirmed = await self.stop_callback()
         except Exception:
             return ApiResult(code="STOP_FAILED")
-        # An adapter acknowledgment is not proof that the physical device is silent.
-        return ApiResult(
-            code="STOP_REQUESTED",
-            confirmation="Abbruch des Weckers wurde angefordert.",
-        )
+        # The session reports back what it observed: True means the player
+        # confirmed silence, anything else means the stop was requested but
+        # never confirmed. An adapter acknowledgment alone is not proof that
+        # the device is quiet, so the spoken answer must not claim more than
+        # the session proved.
+        if confirmed is not True:
+            return ApiResult(
+                code="STOP_REQUESTED",
+                confirmation="Stopp angefordert, die Wiedergabe ist aber nicht bestätigt.",
+            )
+        return ApiResult(code="STOP_REQUESTED", confirmation="Wecker gestoppt.")
 
     @staticmethod
     def _confirmed(result: ApiResult, confirmation: str) -> ApiResult:
