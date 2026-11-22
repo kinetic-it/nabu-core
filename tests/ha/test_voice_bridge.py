@@ -141,7 +141,7 @@ async def test_stop_is_forwarded_and_never_promised_as_silence(tmp_path):
     _, registry = build_voice(tmp_path, stopped=stopped)
     stub = Stub(registry)
 
-    reply = await run(stub, "Nabu, stopp.")
+    reply = await run(stub, "Wecker aus.")
 
     assert calls == [True]
     # R18: bestaetigter Stopp heisst "gestoppt"; unbestaetigt heisst "nicht bestaetigt".
@@ -156,7 +156,7 @@ async def test_an_unconfirmed_stop_never_promises_silence(tmp_path):
     _, registry = build_voice(tmp_path, stopped=stopped)
     stub = Stub(registry)
 
-    reply = await run(stub, "Nabu, stopp.")
+    reply = await run(stub, "Wecker aus.")
 
     assert reply is not None
     assert "nicht bestätigt" in reply
@@ -190,7 +190,7 @@ async def test_an_explicit_alarm_stop_still_works_without_ringing(tmp_path):
     _, registry = build_voice(tmp_path, stopped=stopped)
     stub = Stub(registry)
 
-    reply = await run(stub, "Nabu, stopp.")
+    reply = await run(stub, "Wecker aus.")
 
     assert calls == [True]
     # R18: Die Antwort nennt nur, was die Session bestaetigt hat.

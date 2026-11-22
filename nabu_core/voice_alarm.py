@@ -457,33 +457,51 @@ _STOP_SHORT: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Stop commands that name the alarm themselves - unambiguous on their own.
+#: Explicit alarm commands. They name the alarm themselves, so they stay alarm
+#: commands even when nothing rings - the answer is then "no alarm is ringing"
+#: and no player is touched.
 _STOP_ALARM_PHRASES: Final[frozenset[str]] = frozenset(
     {
         "stopp den wecker",
         "stop den wecker",
-        "nabu stopp",
-        "nabu stop",
         "stoppe den wecker",
         "wecker aus",
         "wecker stopp",
         "wecker stop",
         "wecker ausmachen",
+        "wecker abstellen",
         "mach den wecker aus",
+        "schalte den wecker aus",
         "alarm aus",
         "alarm stopp",
-        "klingel aus",
-        "klingeln aus",
-        "klingel abstellen",
-        "klingeln abstellen",
-        "hör auf zu klingeln",
-        "hoer auf zu klingeln",
+        "alarm stop",
+    }
+)
+
+#: Unspecific stop forms. "Hör auf", "sei still" or "Klingel aus" may belong to
+#: music, a vacuum, the doorbell or a running alarm, so they are *not* alarm
+#: commands by themselves: they only act while our alarm is actually ringing.
+#: Without a ring they fall back to the normal conversation path.
+_STOP_CONTEXT_PHRASES: Final[frozenset[str]] = frozenset(
+    {
         "hör auf",
         "hoer auf",
         "aufhören",
         "aufhoeren",
+        "hör auf zu klingeln",
+        "hoer auf zu klingeln",
         "sei still",
+        "still jetzt",
+        "ruhe jetzt",
         "ende jetzt",
+        "genug jetzt",
+        "klingel aus",
+        "klingeln aus",
+        "klingel abstellen",
+        "klingeln abstellen",
+        "nabu stopp",
+        "nabu stop",
+        "mach aus",
     }
 )
 
@@ -498,7 +516,14 @@ def _without_fillers(text: str) -> str:
 
 
 def match_stop(utterance: str) -> str | None:
-    """Classify a stop command as ``"alarm"``, ``"generic"`` or ``None``.
+    """Classify a stop command as ``"alarm"``, ``"context"`` or ``None``.
+
+    ``"alarm"``  - the command names the alarm ("Wecker aus"), so it is an alarm
+                   command even when nothing rings.
+    ``"context"`` - the command is unspecific ("Stopp", "Hör auf", "Klingel aus").
+                   It may belong to music, a vacuum, the doorbell or our alarm,
+                   so the caller must decide by the actual ring state: only a
+                   running alarm may be stopped, everything else stays chat.
 
     Only a *pure* stop command matches. An unrelated sentence that merely
     contains a stop word - "ich muss aufhören zu rauchen", "wie stoppe ich den
@@ -517,10 +542,10 @@ def match_stop(utterance: str) -> str | None:
     core = _without_fillers(text)
     if not core:
         return None
-    if core in _STOP_SHORT:
-        return "generic"
     if core in _STOP_ALARM_PHRASES:
         return "alarm"
+    if core in _STOP_SHORT or core in _STOP_CONTEXT_PHRASES:
+        return "context"
     return None
 
 
@@ -538,9 +563,9 @@ _LIST_PHRASES: Final[frozenset[str]] = frozenset(
 
 
 def is_generic_stop(utterance: str) -> bool:
-    """Whether this is a bare stop word without an alarm reference."""
+    """Whether this is an unspecific stop that needs the ring state to act."""
 
-    return match_stop(utterance) == "generic"
+    return match_stop(utterance) == "context"
 
 
 def is_stop_utterance(utterance: str) -> bool:

@@ -154,3 +154,70 @@ async def test_a_stop_never_touches_existing_alarms(tmp_path) -> None:
     alarms = voice.service.list().alarms
     assert len(alarms) == 1
     assert alarms[0].enabled is True
+
+
+# --- R19-Review: unspezifische Formen sind kontextabhaengig -----------------
+CONTEXT_FORMS = ["Stopp.", "Oh, Stopp.", "Hör auf", "Klingel aus.", "Sei still", "Aufhören"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("utterance", CONTEXT_FORMS)
+async def test_unspecific_stop_without_ring_goes_to_the_chat(tmp_path, utterance: str) -> None:
+    """Ohne Ring gehoert "hoer auf"/"klingel aus" dem Chat, nicht dem Wecker.
+
+    R19-Review: diese Formen sind mehrdeutig (Musik, Staubsauger, Tuerklingel).
+    Sie duerfen ohne eigenen Ring keine Alarmzustaendigkeit beanspruchen.
+    """
+
+    _, registry, calls = build_voice(tmp_path, ringing=False)
+    stub = Stub(registry)
+
+    assert await run(stub, utterance) is None, utterance
+    assert calls == [], utterance
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("utterance", CONTEXT_FORMS)
+async def test_unspecific_stop_without_ring_does_not_claim_the_alarm(
+    tmp_path, utterance: str
+) -> None:
+    """Bei offener Rueckfrage bleibt der Chat zustaendig, nicht der Stopp.
+
+    Der Konversationspfad selbst raeumt die Rueckfrage ab; entscheidend ist,
+    dass der Stopp sie nicht als Alarmbefehl an sich zieht.
+    """
+
+    _, registry, calls = build_voice(tmp_path, ringing=False)
+    stub = Stub(registry)
+    stub._alarm_pending["c1"] = ("Stell einen Wecker", "missing_time")
+
+    assert await run(stub, utterance) is None, utterance
+    assert calls == [], utterance
+    assert "c1" not in stub._alarm_pending, "der Chatpfad hat die Rueckfrage uebernommen"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("utterance", ["Schalte den Wecker aus.", "Wecker abstellen", "Alarm aus."])
+async def test_explicit_alarm_stop_without_ring_never_touches_a_device(
+    tmp_path, utterance: str
+) -> None:
+    """Ein ausdruecklicher Weckerbefehl bleibt zustaendig, fasst aber nichts an."""
+
+    _, registry, calls = build_voice(tmp_path, ringing=False)
+    stub = Stub(registry)
+
+    reply = await run(stub, utterance)
+
+    assert reply == "Es klingelt gerade kein Wecker.", utterance
+    assert calls == [], "ohne Ring darf kein Player angesprochen werden"
+
+
+@pytest.mark.asyncio
+async def test_a_klingel_command_is_not_a_door_bell_command(tmp_path) -> None:
+    """'Klingel aus' darf ohne eigenen Ring keine Zuständigkeit erzeugen."""
+
+    _, registry, calls = build_voice(tmp_path, ringing=False)
+    stub = Stub(registry)
+
+    assert await run(stub, "Klingel aus.") is None
+    assert calls == []

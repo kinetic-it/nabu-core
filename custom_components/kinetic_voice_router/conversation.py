@@ -79,9 +79,9 @@ async def _stop_reply(text: str, voice) -> tuple[bool, str | None]:
     """Answer a stop command before any other alarm or chat logic.
 
     Returns ``(handled, reply)``. ``handled`` with ``reply is None`` means the
-    utterance is a bare stop outside a ring and therefore belongs to the chat
-    agent (music, vacuum, ...). Nothing here touches another device: the silence
-    request goes to the session that is actually ringing.
+    utterance is unspecific and nothing of ours is ringing, so it belongs to the
+    chat agent (music, vacuum, doorbell, ...). Nothing here touches another
+    device: the silence request goes to the session that is actually ringing.
     """
     from datetime import UTC, datetime
 
@@ -90,8 +90,9 @@ async def _stop_reply(text: str, voice) -> tuple[bool, str | None]:
     kind = match_stop(text)
     if kind is None:
         return False, None
-    if kind == "generic" and not voice.is_ringing():
-        # A bare "stopp" without a ring belongs to the rest of the house.
+    if kind == "context" and not voice.is_ringing():
+        # Unspecific forms ("stopp", "hoer auf", "klingel aus") belong to music,
+        # a vacuum or the doorbell unless our own alarm is ringing right now.
         return True, None
     try:
         result = await voice.handle(text, now=datetime.now(UTC))

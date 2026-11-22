@@ -298,7 +298,7 @@ def test_the_trigger_sentence_that_failed_in_the_pipeline_is_understood():
 
 # --- stop is contextual ----------------------------------------------------
 @pytest.mark.parametrize(
-    "utterance", ["Nabu, stopp.", "Wecker aus.", "Hör auf zu klingeln.", "Stopp den Wecker."]
+    "utterance", ["Wecker aus.", "Stopp den Wecker.", "Schalte den Wecker aus.", "Alarm aus."]
 )
 def test_an_explicit_alarm_stop_is_never_generic(utterance):
     from nabu_core.voice_alarm import is_generic_stop
@@ -306,7 +306,18 @@ def test_an_explicit_alarm_stop_is_never_generic(utterance):
     assert is_generic_stop(utterance) is False
 
 
-@pytest.mark.parametrize("utterance", ["stopp", "Stop.", "  stopp  ", "Oh, Stopp."])
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "stopp",
+        "Stop.",
+        "  stopp  ",
+        "Oh, Stopp.",
+        "Nabu, stopp.",
+        "Hör auf zu klingeln.",
+        "Klingel aus.",
+    ],
+)
 def test_a_bare_stop_word_is_generic(utterance):
     from nabu_core.voice_alarm import is_generic_stop
 

@@ -28,7 +28,8 @@ from nabu_core.voice_alarm import (
 MOMENT = datetime(2026, 11, 22, 16, 25, tzinfo=UTC)
 PARSER = AlarmParser(timezone=ZoneInfo("Europe/Berlin"))
 
-GENERIC_STOPS = [
+# Unspezifische Formen: duerfen nur wirken, solange unser Wecker klingelt.
+CONTEXT_STOPS = [
     "Stopp",
     "Stopp.",
     "stopp!",
@@ -41,20 +42,26 @@ GENERIC_STOPS = [
     "Aus.",
     "stopp doch mal jetzt",
     "Genug jetzt",
+    "Hör auf",
+    "Hör auf!",
+    "Aufhören",
+    "sei still",
+    "hör auf zu klingeln",
+    "Klingel aus",
+    "Klingeln aus.",
+    "hey nabu stopp",
+    "Nabu, stopp.",
 ]
 
+# Ausdruecklich weckerbezogen: bleiben Alarmbefehl, auch wenn nichts klingelt.
 NAMED_STOPS = [
     "Wecker aus",
     "Wecker aus.",
     "Stopp den Wecker",
-    "Hör auf",
-    "Hör auf!",
-    "hör auf zu klingeln",
-    "Aufhören",
-    "sei still",
     "Alarm aus",
     "Mach den Wecker aus.",
-    "hey nabu stopp",
+    "Schalte den Wecker aus.",
+    "Wecker abstellen",
 ]
 
 FOREIGN_SPEECH = [
@@ -71,9 +78,9 @@ FOREIGN_SPEECH = [
 ]
 
 
-@pytest.mark.parametrize("utterance", GENERIC_STOPS)
-def test_bare_stop_is_recognised(utterance: str) -> None:
-    assert match_stop(utterance) == "generic", utterance
+@pytest.mark.parametrize("utterance", CONTEXT_STOPS)
+def test_unspecific_stop_is_context_dependent(utterance: str) -> None:
+    assert match_stop(utterance) == "context", utterance
     assert is_generic_stop(utterance) is True
     assert is_stop_utterance(utterance) is True
 
@@ -85,7 +92,7 @@ def test_named_stop_is_recognised(utterance: str) -> None:
     assert is_stop_utterance(utterance) is True
 
 
-@pytest.mark.parametrize("utterance", [*GENERIC_STOPS, *NAMED_STOPS])
+@pytest.mark.parametrize("utterance", [*CONTEXT_STOPS, *NAMED_STOPS])
 def test_parser_turns_every_stop_into_a_stop_intent(utterance: str) -> None:
     parsed = PARSER.parse(utterance, now=MOMENT)
 
@@ -115,11 +122,11 @@ def test_negation_is_never_read_as_stop() -> None:
 def test_the_r17_hardware_transcript_is_a_stop() -> None:
     """Der genaue Satz aus dem fehlgeschlagenen Abnahmetest."""
 
-    assert match_stop("Oh, Stopp.") == "generic"
+    assert match_stop("Oh, Stopp.") == "context"
 
 
 def test_stop_matching_has_no_state_and_is_deterministic() -> None:
     for _ in range(3):
-        assert match_stop("Oh, Stopp.") == "generic"
+        assert match_stop("Oh, Stopp.") == "context"
         assert match_stop("Wecker aus.") == "alarm"
         assert match_stop("Hör auf zu singen") is None
