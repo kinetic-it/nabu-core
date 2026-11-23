@@ -226,6 +226,12 @@ class MediaPlayerAdapter:
         # EFFEKT unseres eigenen play_media, niemals die Medienidentitaet (D5).
         self._effect_at: dict[str, float] = {}
         self._play_at: dict[str, float] = {}
+        # Sitzungsweite Zuordnung: Ziel -> Zeitpunkt, an dem DIESER Adapter ein
+        # eigenes play_media bestaetigt gesehen hat. Sie ueberlebt einen
+        # Generationenwechsel des Rings (zwischen zwei Runden ist _ring None),
+        # wird aber bei jedem Stopp geloescht. Ohne diesen Eintrag bleibt fremde
+        # Wiedergabe unangetastet.
+        self._owned: dict[str, float] = {}
         self._pending_restore: dict[str, _Ring] = {}
         self._journal = VolumeJournal(recovery_store) if recovery_store is not None else None
 
@@ -317,6 +323,17 @@ class MediaPlayerAdapter:
         if now - started > 30.0:
             return
         self._effect_at[target] = now
+        self._owned[target] = now
+
+    def _session_owns(self, target: str, *, window: float = 3600.0) -> bool:
+        """True while this adapter confirmed its own playback on the target."""
+        seen = self._owned.get(target)
+        if seen is None:
+            return False
+        return (asyncio.get_running_loop().time() - seen) <= window
+
+    def _release_ownership(self, target: str) -> None:
+        self._owned.pop(target, None)
 
     def _recent_effect(self, target: str, *, window: float = 300.0) -> bool:
         """True when this adapter saw the target playing recently.
@@ -500,6 +517,15 @@ class MediaPlayerAdapter:
         self._stop_requested.clear()
 
     async def _finish(self, ring: _Ring) -> PlaybackOutcome:
+        try:
+            return await self._finish_locked(ring)
+        finally:
+            # Nach dem Stopp ist die Sitzung beendet - die Zuordnung darf nicht
+            # in eine spaetere, fremde Wiedergabe hineinreichen.
+            if ring.stopping:
+                self._release_ownership(ring.target)
+
+    async def _finish_locked(self, ring: _Ring) -> PlaybackOutcome:
         result = PlaybackOutcome(PlaybackStatus.STOP_UNCONFIRMED, ring.target, "no_playback")
         async with self._media_lock:
             try:
@@ -600,7 +626,14 @@ class MediaPlayerAdapter:
         target = self._policy.check(entity_id)
         ring = self._ring
         if ring is None or ring.target != target:
-            return PlaybackOutcome(PlaybackStatus.STOP_UNCONFIRMED, target, "no_owned_playback")
+            # Zwischen zwei Ring-Generationen ist _ring None. Nur wenn diese
+            # Sitzung auf dem Ziel nachweislich selbst abgespielt hat, darf ein
+            # Stopp noch greifen; fremde Wiedergabe bleibt unberuehrt.
+            if not self._session_owns(target):
+                return PlaybackOutcome(PlaybackStatus.STOP_UNCONFIRMED, target, "no_owned_playback")
+            result = await self._stop_transport(target, wait=self._stop_timeout, interval=0.1)
+            self._release_ownership(target)
+            return result
         return await asyncio.shield(self._cleanup(ring))
 
     async def duck(self, seconds: float) -> PlaybackOutcome:
