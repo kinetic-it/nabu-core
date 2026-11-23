@@ -75,6 +75,32 @@ HERMES_FAILED = "Hermes Agent could not process the request."
 _HERMES_ERRORS = (HermesError, TypeError, ValueError)
 
 
+#: A tool that was cancelled mid-turn must never be spoken as a Python error.
+_ERROR_TEXT = re.compile(
+    r"^\s*(?:error|exception|traceback|"
+    r"(?:asyncio\.)?cancellederror|valueerror|runtimeerror|keyerror|typeerror|"
+    r"timeouterror|attributeerror|httpx\.[a-z]+error)\b",
+    re.IGNORECASE,
+)
+
+
+def _sanitise_reply(text: str | None) -> str:
+    """Replace leaked exception text with a calm German sentence.
+
+    A cancelled tool call surfaces as ``Error: CancelledError`` in the assistant
+    content. That is an implementation detail, not an answer, and it was spoken
+    in R20 (T5). Anything that looks like a raw error becomes the honest
+    fallback instead.
+    """
+    value = (text or "").strip()
+    if not value:
+        return "Das habe ich nicht verstanden."
+    if _ERROR_TEXT.match(value) or "CancelledError" in value or "Traceback" in value:
+        _LOGGER.warning("Suppressed raw error text in a spoken answer")
+        return "Das habe ich nicht verstanden."
+    return value
+
+
 async def _stop_reply(text: str, voice) -> tuple[bool, str | None]:
     """Answer a stop command before any other alarm or chat logic.
 
@@ -424,6 +450,7 @@ class KineticVoiceRouterConversationEntity(conversation.ConversationEntity):
         *,
         arm_followup: bool = True,
     ) -> conversation.ConversationResult:
+        text = _sanitise_reply(text)
         chat_log.async_add_assistant_content_without_tools(
             conversation.AssistantContent(agent_id=user_input.agent_id, content=text)
         )

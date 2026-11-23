@@ -187,6 +187,18 @@ class AlarmParser:
             rf"(?:lösche|loesche|entferne) (?:den|meinen) {_ALARM_PATTERN}", text
         ):
             return _ok(AlarmIntent(kind=IntentKind.DELETE, label=name))
+        if name != "wecker" and re.fullmatch(
+            r"(?:lösche|loesche|entferne) (?:den|meinen) wecker [a-zäöüß]+", text
+        ):
+            return _ok(AlarmIntent(kind=IntentKind.DELETE, label=name))
+        if name != "wecker" and re.fullmatch(
+            r"(?:lösche|loesche|entferne) (?:den|meinen) [a-zäöüß]+ wecker", text
+        ):
+            return _ok(AlarmIntent(kind=IntentKind.DELETE, label=name))
+        if name != "wecker" and re.fullmatch(
+            r"(?:lösche|loesche|entferne) [a-zäöüß]*wecker", text
+        ):
+            return _ok(AlarmIntent(kind=IntentKind.DELETE, label=name))
         return _error("unsupported_tokens")
 
     def _parse_deactivate(self, text: str, now: datetime) -> ParseResult:
@@ -390,9 +402,38 @@ def _error(code: str) -> ParseResult:
     return ParseResult(status=ParseStatus.ERROR, code=code)
 
 
+#: Words that may be glued to *wecker* by the speech recogniser ("Welchewecker").
+#: Only these are split again; real compound names ("Medikamentenwecker") stay intact.
+_DEMERGE_PREFIXES: Final[frozenset[str]] = frozenset(
+    {
+        "welche", "welcher", "welches", "was", "für",
+        "meine", "meinen", "mein", "meiner",
+        "der", "den", "die", "das", "dem",
+        "alle", "jeder", "jede", "jeden", "jedes",
+        "anderer", "andere", "anderen",
+        "naechste", "nächste", "naechster", "nächster",
+        "erste", "ersten", "zweite", "zweiten", "dritte", "dritten",
+    }
+)
+
+
+def _demerge_wecker(text: str) -> str:
+    """Put a space back where the recogniser glued a determiner to *wecker*."""
+    out: list[str] = []
+    for word in text.split():
+        if word.endswith("wecker") and len(word) > len("wecker"):
+            head = word[: -len("wecker")]
+            if head in _DEMERGE_PREFIXES:
+                out.extend((head, "wecker"))
+                continue
+        out.append(word)
+    return " ".join(out)
+
+
 def _normalise(text: str) -> str:
     joined = re.sub(r"(\w)-(wecker)\b", r"\1\2", text.casefold())
-    return " ".join(re.sub(r"[?!.,]", " ", joined).split())
+    cleaned = " ".join(re.sub(r"[?!.,]", " ", joined).split())
+    return _demerge_wecker(cleaned)
 
 
 #: Words a speaker (or the speech recogniser) may put around a stop command.
@@ -578,8 +619,13 @@ def _is_stop(text: str) -> bool:
     return match_stop(text) is not None
 
 
+_LIST_QUESTION: Final[re.Pattern[str]] = re.compile(
+    r"^(?:welche|was für|was fuer) (?:wecker|alarme)\b"
+)
+
+
 def _is_list(text: str) -> bool:
-    return text in _LIST_PHRASES or _wants_next(text)
+    return text in _LIST_PHRASES or _wants_next(text) or bool(_LIST_QUESTION.match(text))
 
 
 def _wants_next(text: str) -> bool:
@@ -625,6 +671,22 @@ def _has_create_verb(text: str) -> bool:
     return bool(re.search(rf"\b{_CREATE_VERB}\b", text))
 
 
+#: Words that follow "wecker" but are no name ("ein wecker um sieben").
+_NAME_STOPWORDS: Final[frozenset[str]] = frozenset(
+    {
+        "um", "auf", "in", "für", "fuer", "ab", "an", "aus", "ein", "eine", "einen",
+        "heute", "morgen", "abend", "abends", "morgens", "mittags", "nachts",
+        "bitte", "noch", "den", "der", "die", "das", "meinen", "meine", "mein",
+        "wieder", "aktiv", "ausgeschaltet", "eingeschaltet", "deaktiviert",
+        "aktiviert", "stellen", "stelle", "setzen", "setze", "machen", "mache",
+        "soll", "sollte", "ich", "du", "wir",
+        # Verben stehen im Satz direkt vor "wecker" und sind kein Name.
+        "lösche", "loesche", "entferne", "deaktiviere", "aktiviere", "schalte",
+        "ändere", "aendere", "verschiebe", "stell", "erstelle", "erzeuge", "brauche", "will",
+    }
+)
+
+
 def _alarm_name(text: str) -> str | None:
     """Return the spoken alarm word, e.g. ``medikamentenwecker`` or ``wecker``."""
     explicit = re.search(r"\b(?:namens|namen)\s+([a-zäöüß]+)", text)
@@ -634,7 +696,17 @@ def _alarm_name(text: str) -> str | None:
     if not words:
         return None
     named = [word for word in words if word != "wecker"]
-    return named[0] if named else "wecker"
+    if named:
+        return named[0]
+    # "loesche meinen wecker pilot": the name follows the plain word.
+    trailing = re.search(r"\bwecker\s+([a-zäöüß]{2,})(?=\s|$)", text)
+    if trailing and trailing.group(1) not in _NAME_STOPWORDS:
+        return trailing.group(1)
+    # "loesche meinen Test. Wecker.": the recogniser split the compound.
+    leading = re.search(r"\b([a-zäöüß]{2,})\s+wecker\b", text)
+    if leading and leading.group(1) not in _NAME_STOPWORDS:
+        return leading.group(1)
+    return "wecker"
 
 
 def _label(name: str | None) -> str | None:

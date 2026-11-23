@@ -160,6 +160,19 @@ class AlarmSession:
                         restarts,
                         self.max_restarts,
                     )
+                    if reason == "interaction_active" and self.interaction_active is not None:
+                        # Restarting while the pipeline is still listening cancels the
+                        # in-flight tool call (R20: "Error: CancelledError"). Wait for
+                        # the turn to end first; a stop request wins over the restart.
+                        await self._await_interaction_end(deadline)
+                        if self._stop_requested.is_set():
+                            stopped = await self._quietly_stop()
+                            outcome = (
+                                SessionOutcome.STOPPED
+                                if stopped
+                                else SessionOutcome.STOP_UNCONFIRMED
+                            )
+                            return await self._finish(outcome, "stop_requested", restarts)
                     await self._restart_pause(deadline)
                     continue
                 verdict = self._ring_result(ring_task)
@@ -219,6 +232,19 @@ class AlarmSession:
                 return await self._finish(verdict[0], verdict[1], restarts)
         finally:
             await self._resume_music(claim)
+
+    async def _await_interaction_end(self, deadline: float) -> None:
+        """Wait (bounded) until the voice turn is over so a restart cannot cancel it."""
+        if self.interaction_active is None:
+            return
+        limit = min(deadline, asyncio.get_running_loop().time() + 10.0)
+        while asyncio.get_running_loop().time() < limit:
+            if self._stop_requested.is_set() or not await self._interaction():
+                return
+            try:
+                await asyncio.wait_for(self._wake.wait(), self.poll)
+            except TimeoutError:
+                pass
 
     async def _restart_pause(self, deadline: float) -> None:
         remaining = deadline - asyncio.get_running_loop().time()

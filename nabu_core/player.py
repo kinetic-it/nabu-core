@@ -222,6 +222,10 @@ class MediaPlayerAdapter:
         self._cycle_off = cycle_off
         self._media_lock = asyncio.Lock()
         self._ring: _Ring | None = None
+        # Zeitpunkt des letzten beobachteten Abspielens je Ziel. Belegt nur den
+        # EFFEKT unseres eigenen play_media, niemals die Medienidentitaet (D5).
+        self._effect_at: dict[str, float] = {}
+        self._play_at: dict[str, float] = {}
         self._pending_restore: dict[str, _Ring] = {}
         self._journal = VolumeJournal(recovery_store) if recovery_store is not None else None
 
@@ -237,6 +241,7 @@ class MediaPlayerAdapter:
                 await self._client.play_media(target, self._media)
         except Exception as error:
             return PlaybackOutcome(PlaybackStatus.FAILED, target, type(error).__name__)
+        self._play_at[target] = asyncio.get_running_loop().time()
         return PlaybackOutcome(PlaybackStatus.ACCEPTED, target, "command_accepted")
 
     async def confirm_playing(
@@ -253,6 +258,7 @@ class MediaPlayerAdapter:
                 last_error = type(error).__name__
             else:
                 if str(state).lower() in PLAYING_STATES:
+                    self._note_effect(target)
                     return PlaybackOutcome(PlaybackStatus.PLAYING_CONFIRMED, target, str(state))
                 last_error = f"state={state}"
             if asyncio.get_running_loop().time() >= deadline:
@@ -297,6 +303,31 @@ class MediaPlayerAdapter:
     async def _state(self, target: str) -> str:
         async with asyncio.timeout(IO_TIMEOUT):
             return str(await self._client.get_state(target)).lower()
+
+    def _note_effect(self, target: str) -> None:
+        """Record playback we started ourselves - never foreign playback.
+
+        Only a playing state that follows our own recent play request counts, so
+        an untouched stream on the same speaker can never be stopped on suspicion.
+        """
+        started = self._play_at.get(target)
+        if started is None:
+            return
+        now = asyncio.get_running_loop().time()
+        if now - started > 30.0:
+            return
+        self._effect_at[target] = now
+
+    def _recent_effect(self, target: str, *, window: float = 300.0) -> bool:
+        """True when this adapter saw the target playing recently.
+
+        This proves the effect of our own play_media request, not the identity of
+        the stream (D5). It is used only to end a ring we started ourselves.
+        """
+        seen = self._effect_at.get(target)
+        if seen is None:
+            return False
+        return (asyncio.get_running_loop().time() - seen) <= window
 
     async def _read_volume(self, target: str) -> float | None:
         reader = getattr(self._client, "get_volume", None)
@@ -343,7 +374,10 @@ class MediaPlayerAdapter:
         """
         if ring.started:
             return True
-        return ring.play_attempted and state in PLAYING_STATES
+        # A play request alone proves nothing: the speaker may have been playing
+        # somebody else's stream. Only an observed effect of our own request
+        # counts, so foreign media is never stopped on suspicion (D5).
+        return ring.play_attempted and self._recent_effect(ring.target)
 
     async def _set_volume(self, ring: _Ring, level: float) -> bool:
         setter = getattr(self._client, "set_volume", None)
@@ -475,6 +509,19 @@ class MediaPlayerAdapter:
                         PlaybackStatus.STOPPED_CONFIRMED, ring.target, "already_idle"
                     )
                     return result
+                if (
+                    not ring.started
+                    and ring.play_attempted
+                    and self._recent_effect(ring.target)
+                    and state in {"idle", "off", "standby"}
+                ):
+                    # Playback was never confirmed, but our own request produced it
+                    # and the target is silent now. Effect proof, not identity proof.
+                    return PlaybackOutcome(
+                        PlaybackStatus.STOPPED_CONFIRMED,
+                        ring.target,
+                        "already_idle_after_effect",
+                    )
                 relation = await self._identify_media(ring)
                 if relation == IDENTITY_FOREIGN:
                     return PlaybackOutcome(
