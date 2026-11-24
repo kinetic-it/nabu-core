@@ -99,6 +99,14 @@ _TIME_PATTERN: Final[str] = (
     r"|(?:\d{1,2}|[a-zäöüß]+)(?::\d{2})?(?:\s+uhr)?)"
 )
 _ALARM_PATTERN: Final[str] = r"(?:[a-zäöüß]*wecker)"
+#: An alarm name may be glued to the word ("arbeitwecker") or stand as a
+#: separate word before or after it ("wecker arbeit", "arbeit wecker"). The
+#: article is optional, so "Lösche Wecker Arbeit" works like
+#: "Lösche den Wecker Arbeit" - and both still resolve through _alarm_name().
+_NAME_REF: Final[str] = (
+    r"(?:(?:den|meinen|dem) )?"
+    rf"(?:{_ALARM_PATTERN}|wecker [a-zäöüß]+|[a-zäöüß]+ wecker)"
+)
 _CREATE_VERB: Final[str] = r"(?:stell(?:e)?|erstelle|erzeuge|erinnere(?: mich)?)"
 _WAKE_VERB: Final[str] = r"(?:weck(?:e)? mich|wecke mich)"
 
@@ -183,21 +191,7 @@ class AlarmParser:
         name = _alarm_name(text)
         if name in {None, "wecker"}:
             return _clarify("missing_alarm_selector", "Welchen Wecker soll ich löschen?")
-        if name != "wecker" and re.fullmatch(
-            rf"(?:lösche|loesche|entferne) (?:den|meinen) {_ALARM_PATTERN}", text
-        ):
-            return _ok(AlarmIntent(kind=IntentKind.DELETE, label=name))
-        if name != "wecker" and re.fullmatch(
-            r"(?:lösche|loesche|entferne) (?:den|meinen) wecker [a-zäöüß]+", text
-        ):
-            return _ok(AlarmIntent(kind=IntentKind.DELETE, label=name))
-        if name != "wecker" and re.fullmatch(
-            r"(?:lösche|loesche|entferne) (?:den|meinen) [a-zäöüß]+ wecker", text
-        ):
-            return _ok(AlarmIntent(kind=IntentKind.DELETE, label=name))
-        if name != "wecker" and re.fullmatch(
-            r"(?:lösche|loesche|entferne) [a-zäöüß]*wecker", text
-        ):
+        if re.fullmatch(rf"(?:lösche|loesche|entferne) {_NAME_REF}", text):
             return _ok(AlarmIntent(kind=IntentKind.DELETE, label=name))
         return _error("unsupported_tokens")
 
@@ -207,7 +201,7 @@ class AlarmParser:
             return _ok(
                 AlarmIntent(kind=IntentKind.DEACTIVATE, date=(now + timedelta(days=1)).date())
             )
-        if name != "wecker" and re.fullmatch(rf"deaktiviere (?:den|meinen) {_ALARM_PATTERN}", text):
+        if name != "wecker" and re.fullmatch(rf"deaktiviere {_NAME_REF}", text):
             return _ok(AlarmIntent(kind=IntentKind.DEACTIVATE, label=name))
         if name in {None, "wecker"}:
             return _clarify("missing_alarm_selector", "Welchen Wecker soll ich deaktivieren?")
@@ -224,7 +218,7 @@ class AlarmParser:
         if name in {None, "wecker"}:
             return _clarify("missing_alarm_selector", "Welchen Wecker soll ich aktivieren?")
         if not re.fullmatch(
-            rf"(?:aktiviere|schalte) (?:den|meinen) {_ALARM_PATTERN}(?: wieder)?(?: ein)?",
+            rf"(?:aktiviere|schalte) {_NAME_REF}(?: wieder)?(?: ein)?",
             text,
         ):
             return _error("unsupported_tokens")
@@ -433,7 +427,35 @@ def _demerge_wecker(text: str) -> str:
 def _normalise(text: str) -> str:
     joined = re.sub(r"(\w)-(wecker)\b", r"\1\2", text.casefold())
     cleaned = " ".join(re.sub(r"[?!.,]", " ", joined).split())
-    return _demerge_wecker(cleaned)
+    return _demerge_wecker(" ".join(_strip_leading_fillers(cleaned.split())))
+
+
+#: Hesitations, vocatives and discourse markers a speaker or the speech
+#: recogniser puts in front of a command. They carry no meaning, so
+#: "Äh, welche Wecker habe ich" is the same request as "Welche Wecker habe ich".
+#: Negations ("nein", "nicht") are deliberately absent: "Nein, lösche ..." must
+#: never turn into a delete command.
+_LEADING_FILLERS: Final[frozenset[str]] = frozenset(
+    {
+        "äh", "aeh", "ähm", "aehm", "ahm", "ah", "ahh", "eh", "ehm", "öh", "oeh",
+        "hm", "hmm", "mhm", "mh", "ach",
+        "also", "na", "nu", "nun", "tja", "so",
+        "ja", "jo", "ok", "okay", "okey",
+        "oh", "o", "ohh", "ooh",
+        "hey", "hej", "hallo", "hi", "moin", "servus",
+        "bitte", "mal", "schnell", "sofort", "doch",
+        "jarvis", "alexa", "nabu", "assistent", "liebes", "liebe",
+    }
+)
+
+
+def _strip_leading_fillers(tokens: list[str]) -> list[str]:
+    """Drop fillers in front of a command, but never the last word itself."""
+
+    index = 0
+    while index < len(tokens) - 1 and tokens[index] in _LEADING_FILLERS:
+        index += 1
+    return tokens[index:]
 
 
 #: Words a speaker (or the speech recogniser) may put around a stop command.
@@ -878,3 +900,119 @@ def _local_datetime(
 
 def _round_trips(value: datetime, naive: datetime, zone: ZoneInfo) -> bool:
     return value.astimezone(UTC).astimezone(zone).replace(tzinfo=None) == naive
+
+
+# --- Alarm command gate -------------------------------------------------------
+# Nabu-Core owns the alarm intents. When the grammar rejects an utterance, the
+# router must not hand everything to the chat agent: an obvious alarm command
+# deserves a short help answer instead. Talking *about* alarms stays chat, so the
+# test is a conservative shape check, never a substring search for "weck".
+
+#: A command starts with one of these verbs (after fillers were stripped).
+_COMMAND_OPENERS: Final[frozenset[str]] = frozenset(
+    {
+        "stell", "stelle", "stellen", "erstelle", "erzeuge", "erinnere",
+        "leg", "lege", "mach", "mache", "setz", "setze", "brauche", "will",
+        "lösch", "loesch", "lösche", "loesche", "entfern", "entferne",
+        "aktivier", "aktiviere", "deaktivier", "deaktiviere",
+        "ändere", "aendere", "verschiebe", "schalte",
+        "stopp", "stoppe", "beende", "zeig", "zeige", "liste", "nenne",
+    }
+)
+
+#: Questions about the user's *own* alarms start like this.
+_QUESTION_OPENERS: Final[frozenset[str]] = frozenset(
+    {"welche", "welcher", "welchen", "welches", "wie", "wieviele"}
+)
+
+#: Words that tie the question to the user's own alarms ("habe ich", "mein").
+_POSSESSION_MARKERS: Final[frozenset[str]] = frozenset(
+    {"habe", "hab", "haben", "hat", "mein", "meine", "meinen", "meiner", "meinem"}
+)
+
+#: Words that turn the sentence into a knowledge question.
+_KNOWLEDGE_MARKERS: Final[frozenset[str]] = frozenset(
+    {
+        "funktioniert", "funktionieren", "bedeutet", "heißt", "heisst",
+        "erklärt", "erklaert", "erklär", "erklaer", "unterschied",
+        "warum", "wieso", "weshalb", "geschichte",
+    }
+)
+
+#: Control words or a clock time turn "Wecker ..." into a command.
+_CONTROL_MARKERS: Final[frozenset[str]] = frozenset(
+    {"aus", "an", "ab", "stopp", "stop", "uhr", "um", "auf", "in", "morgen", "heute"}
+)
+
+HINT_LIST = (
+    "Ich kann dir sagen, welche Wecker aktiv sind. "
+    "Frag zum Beispiel: Welche Wecker habe ich?"
+)
+HINT_COMMAND = (
+    "Diesen Weckerbefehl verstehe ich noch nicht. "
+    "Sag zum Beispiel: Stell einen Wecker auf sieben Uhr, "
+    "oder: Lösche meinen Wecker Arbeit."
+)
+
+#: A negated alarm command must never act - and must not reach the chat agent
+#: either, because a chat model has no business deleting an alarm.
+HINT_NEGATED = "Ich ändere nichts: Du hast den Weckerbefehl verneint."
+
+_NEGATION_MARKERS: Final[frozenset[str]] = frozenset(
+    {"nicht", "nein", "net", "ned", "kein", "keine", "keinen", "niemals", "nie"}
+)
+
+
+def _mentions_alarm(tokens: list[str]) -> bool:
+    return any(
+        token in {"wecker", "alarm", "alarme"} or token.endswith("wecker")
+        for token in tokens
+    )
+
+
+def is_alarm_command(utterance: str) -> bool:
+    """Whether the utterance is meant as alarm handling, not chat about alarms.
+
+    Conservative on purpose: "Wie funktioniert ein Wecker" and "Warum hat mein
+    Wecker nicht geklingelt" must keep going to the conversation agent.
+    """
+
+    if not isinstance(utterance, str):
+        return False
+    text = _normalise(utterance)
+    if not text:
+        return False
+    tokens = text.split()
+    if not _mentions_alarm(tokens):
+        return False
+    if _KNOWLEDGE_MARKERS.intersection(tokens):
+        return False
+    head = tokens[0]
+    if head in _COMMAND_OPENERS:
+        return True
+    if head in _QUESTION_OPENERS:
+        return bool(_POSSESSION_MARKERS.intersection(tokens))
+    if head in {"wecker", "alarm", "alarme"}:
+        return bool(_CONTROL_MARKERS.intersection(tokens)) or any(
+            token.isdigit() for token in tokens
+        )
+    return False
+
+
+def alarm_command_hint(utterance: str) -> str | None:
+    """A short help answer for an alarm command the grammar cannot parse."""
+
+    if not isinstance(utterance, str):
+        return None
+    text = _normalise(utterance)
+    tokens = text.split()
+    if (
+        _NEGATION_MARKERS.intersection(tokens)
+        and _mentions_alarm(tokens)
+        and _COMMAND_OPENERS.intersection(tokens)
+    ):
+        return HINT_NEGATED
+    if not is_alarm_command(utterance):
+        return None
+    head = tokens[0]
+    return HINT_LIST if head in _QUESTION_OPENERS else HINT_COMMAND

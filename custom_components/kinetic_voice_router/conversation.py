@@ -295,7 +295,7 @@ class KineticVoiceRouterConversationEntity(conversation.ConversationEntity):
         """
         from datetime import UTC, datetime
 
-        from .nabu_core.voice_alarm import merge_clarification
+        from .nabu_core.voice_alarm import alarm_command_hint, merge_clarification
 
         registry = self.hass.data.get(_ALARM_REGISTRY_KEY)
         if registry is None:
@@ -331,7 +331,10 @@ class KineticVoiceRouterConversationEntity(conversation.ConversationEntity):
             return parsed.question
         if status == "error":
             if (parsed.code or "") in _ALARM_SILENT_CODES:
-                return None
+                # An utterance the grammar does not own is chat - unless it is
+                # clearly an alarm command. Then the user gets a short help
+                # answer instead of a chat model answering an alarm order.
+                return alarm_command_hint(text)
             return _ALARM_REPLIES.get(parsed.code or "", "Das habe ich nicht verstanden.")
         if parsed.intent is None:
             return None
