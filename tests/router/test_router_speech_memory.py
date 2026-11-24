@@ -2,6 +2,10 @@
 categories, conflicts, persistence contract and the shared session state.
 
 Synthetic data only; no devices, persons or recordings.
+
+The file name is unique on purpose: pytest collects with ``--import-mode=prepend``,
+so a second ``test_speech_memory.py`` in another test folder would shadow this module
+and the combined run ``pytest tests`` would stop with an import file mismatch.
 """
 
 from __future__ import annotations
