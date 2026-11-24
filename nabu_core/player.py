@@ -629,6 +629,15 @@ class MediaPlayerAdapter:
             # Zwischen zwei Ring-Generationen ist _ring None. Nur wenn diese
             # Sitzung auf dem Ziel nachweislich selbst abgespielt hat, darf ein
             # Stopp noch greifen; fremde Wiedergabe bleibt unberuehrt.
+            # Vor dem Eigentumsnachweis entscheidet der tatsaechliche Zustand:
+            # ist das Ziel bereits still, ist der Stopp ohne Befehl bestaetigt
+            # und wird nicht als Fehlschlag weitergereicht.
+            try:
+                state = await self._state(target)
+            except Exception:  # noqa: BLE001 - unlesbarer Zustand ist kein Erfolg
+                state = ""
+            if state in STOPPED_STATES:
+                return PlaybackOutcome(PlaybackStatus.STOPPED_CONFIRMED, target, "already_idle")
             if not self._session_owns(target):
                 return PlaybackOutcome(PlaybackStatus.STOP_UNCONFIRMED, target, "no_owned_playback")
             result = await self._stop_transport(target, wait=self._stop_timeout, interval=0.1)

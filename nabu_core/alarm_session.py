@@ -371,7 +371,14 @@ class AlarmSession:
 
     async def _quietly_stop(self) -> bool:
         try:
-            return bool(await self.stop())
+            if await self.stop():
+                return True
+            # Zwischen zwei Ring-Generationen meldet der Dispatcher kein Signal
+            # mehr zurueck, obwohl die Sitzung aktiv ist (R28/D4: die Pruefung
+            # endete bislang in Millisekunden mit einem falschen Fehlschlag).
+            # Dann entscheidet der tatsaechliche Spielerzustand: nur Stillstand
+            # wird bestaetigt, laufende Wiedergabe niemals.
+            return await self._state_is_quiet()
         except Exception as error:
             _LOGGER.warning("Alarm stop failed: %s", type(error).__name__)
             return False
