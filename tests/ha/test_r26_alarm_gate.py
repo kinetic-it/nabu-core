@@ -8,7 +8,9 @@ bundled core, so a passing test means the shipped files carry the gate.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -24,6 +26,7 @@ from custom_components.kinetic_voice_router.nabu_core.ha_services import AlarmSe
 HINT_COMMAND = bundled_voice_alarm.HINT_COMMAND
 HINT_LIST = bundled_voice_alarm.HINT_LIST
 HINT_NEGATED = bundled_voice_alarm.HINT_NEGATED
+BERLIN = ZoneInfo("Europe/Berlin")
 
 
 class Stub:
@@ -109,12 +112,29 @@ async def test_chat_about_alarms_still_reaches_the_agent(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_the_gate_does_not_swallow_a_working_command(tmp_path) -> None:
-    """A command the grammar understands keeps its normal answer."""
+    """A command the grammar understands keeps its normal answer - and really acts.
 
-    _, registry, calls = build_layer(tmp_path)
+    The reply alone proves nothing: an answer without a stored alarm would look
+    identical. So the store is read back: exactly one more alarm, at the spoken
+    time, enabled, and due within the next day.
+    """
+
+    layer, registry, calls = build_layer(tmp_path)
+    before = layer.list({}).as_dict()["data"]["count"]
+    now = datetime.now(UTC)
 
     reply = await run(Stub(registry), "Stell einen Wecker auf 7 Uhr.")
 
     assert reply is not None
     assert reply != HINT_COMMAND
     assert calls == []
+
+    stored = layer.list({}).as_dict()["data"]
+    assert stored["count"] == before + 1, "the spoken command stored no alarm"
+    alarm = stored["alarms"][-1]
+    assert alarm["kind"] == "once"
+    assert alarm["enabled"] is True
+    due = datetime.fromisoformat(alarm["when_utc"])
+    local = due.astimezone(BERLIN)
+    assert (local.hour, local.minute) == (7, 0), f"stored time was {local:%H:%M}, not 07:00"
+    assert now < due <= now + timedelta(days=1)
