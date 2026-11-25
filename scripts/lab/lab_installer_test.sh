@@ -77,7 +77,7 @@ SHA
 run_case() {
   local root="$1" installer="${2:-$INSTALLER}"
   LAB_HA_STATE="$root/ha-state" PATH="$root/bin:$PATH" \
-    HA_LAB_ROOT="$root" HA_TARGET=root@lab.invalid HA_SSH_KEY=/dev/null \
+    HA_LAB_ROOT="$root" HA_TARGET=root@localhost HA_SSH_KEY=/dev/null \
     bash "$installer" "$STAGE_SRC" > "$root/install.log" 2>&1
   echo "$?"
 }
