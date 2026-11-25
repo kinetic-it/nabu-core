@@ -205,6 +205,9 @@ rc=$(run_settle "$ROOT" "$runid")
 expect "Settle mit richtigem Token (0)" "$rc" "0"
 check "Lock ist freigegeben" test ! -d "$ROOT/config/backups/nabu-stage-a.lock"
 check "Settle-Nachweis protokolliert" grep -q "$runid settled" "$ROOT/config/backups/nabu-stage-a/settled.log"
+rc=$(run_settle "$ROOT" "$runid")
+expect "wiederholtes Settle (0)" "$rc" "0"
+check "Lock bleibt frei" test ! -d "$ROOT/config/backups/nabu-stage-a.lock"
 
 echo
 echo "ERGEBNIS: $PASS bestanden, $FAIL fehlgeschlagen"

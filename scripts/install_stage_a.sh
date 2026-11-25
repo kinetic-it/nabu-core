@@ -63,14 +63,23 @@ GUARD
 if [ "${1:-}" = "--settle" ]; then
   TOKEN="${2:?lock token required}"
   [[ "$TOKEN" =~ ^[0-9]{8}-[0-9]{6}-[0-9]+$ ]] || { echo "FEHLER: ungueltiger Lock-Token" >&2; exit 1; }
+  state=$("${SSH[@]}" "if [ -d '$LOCK_DIR' ]; then echo PRESENT; elif grep -q '^$TOKEN settled' '$BACKUP_ROOT/settled.log' 2>/dev/null; then echo ALREADY; else echo MISSING; fi")
+  if [ "$state" = "ALREADY" ]; then
+    echo "SETTLED: Lock war bereits freigegeben (Nachweis vorhanden)."
+    exit 0
+  fi
+  [ "$state" = "PRESENT" ] || { echo "FEHLER: kein Lock und kein Settle-Nachweis fuer $TOKEN" >&2; exit 1; }
   "${SSH[@]}" "set -eu
     test -f '$LOCK_DIR/owner'
     test \"\$(cat '$LOCK_DIR/owner')\" = '$TOKEN'
-    test -f '$LOCK_DIR/installed'
     $RUNNING_GUARD
     # Der Nachweis gehoert in eine Datei, nicht in das Verzeichnis: ein Marker im
-    # Lock-Verzeichnis verhindert das abschliessende rmdir.
-    printf '%s settled %s\n' '$TOKEN' \"\$(date -Is)\" >> '$BACKUP_ROOT/settled.log'
+    # Lock-Verzeichnis verhindert das abschliessende rmdir. Wiederholtes Settle ist
+    # erlaubt, damit ein halb ausgefuehrter Lauf nicht in einem toten Lock endet.
+    if ! grep -q '^$TOKEN settled' '$BACKUP_ROOT/settled.log' 2>/dev/null; then
+      test -f '$LOCK_DIR/installed'
+      printf '%s settled %s\n' '$TOKEN' \"\$(date -Is)\" >> '$BACKUP_ROOT/settled.log'
+    fi
     rm -f '$LOCK_DIR/owner' '$LOCK_DIR/installed' '$LOCK_DIR/settled'
     rmdir '$LOCK_DIR'"
   echo "SETTLED: Lock freigegeben."
