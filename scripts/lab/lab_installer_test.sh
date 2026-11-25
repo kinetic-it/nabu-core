@@ -82,6 +82,14 @@ run_case() {
   echo "$?"
 }
 
+run_settle() {
+  local root="$1" token="$2" installer="${3:-$INSTALLER}"
+  LAB_HA_STATE="$root/ha-state" PATH="$root/bin:$PATH" \
+    HA_LAB_ROOT="$root" HA_TARGET=root@localhost HA_SSH_KEY=/dev/null \
+    bash "$installer" --settle "$token" > "$root/settle.log" 2>&1
+  echo "$?"
+}
+
 expect() {
   local label="$1" actual="$2" wanted="$3"
   if [ "$actual" = "$wanted" ]; then echo "  PASS  $label ($actual)"; PASS=$((PASS+1));
@@ -182,6 +190,20 @@ printf 'stray\n' > "$STAGEEXTRA/notiz.txt"
 rc=$(run_case "$ROOT" "$INSTALLER" "$STAGEEXTRA")
 expect "Exitcode (1 = abgelehnt)" "$rc" "1"
 check "Meldung nennt fremde Dateien" grep -q "Stage enthaelt fremde Dateien" "$ROOT/install.log"
+
+echo "== Fall H: Settle nach erfolgreicher Installation =="
+ROOT="$LAB_BASE/h"; prepare_root "$ROOT"
+rc=$(run_case "$ROOT")
+expect "Installation (10)" "$rc" "10"
+runid=$(grep -o '[0-9]\{8\}-[0-9]\{6\}-[0-9]*' "$ROOT/install.log" | head -1)
+check "Lock haelt nach Installation" test -d "$ROOT/config/backups/nabu-stage-a.lock"
+rc=$(run_settle "$ROOT" "20200101-000000-1")
+check "falscher Token wird abgelehnt" test "$rc" != "0"
+check "Lock bleibt bei falschem Token" test -d "$ROOT/config/backups/nabu-stage-a.lock"
+rc=$(run_settle "$ROOT" "$runid")
+expect "Settle mit richtigem Token (0)" "$rc" "0"
+check "Lock ist freigegeben" test ! -d "$ROOT/config/backups/nabu-stage-a.lock"
+check "Settle-Nachweis protokolliert" grep -q "$runid settled" "$ROOT/config/backups/nabu-stage-a/settled.log"
 
 echo
 echo "ERGEBNIS: $PASS bestanden, $FAIL fehlgeschlagen"

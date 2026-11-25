@@ -68,8 +68,10 @@ if [ "${1:-}" = "--settle" ]; then
     test \"\$(cat '$LOCK_DIR/owner')\" = '$TOKEN'
     test -f '$LOCK_DIR/installed'
     $RUNNING_GUARD
-    printf '%s' '$TOKEN' > '$LOCK_DIR/settled'
-    rm '$LOCK_DIR/owner'
+    # Der Nachweis gehoert in eine Datei, nicht in das Verzeichnis: ein Marker im
+    # Lock-Verzeichnis verhindert das abschliessende rmdir.
+    printf '%s settled %s\n' '$TOKEN' \"\$(date -Is)\" >> '$BACKUP_ROOT/settled.log'
+    rm -f '$LOCK_DIR/owner' '$LOCK_DIR/installed'
     rmdir '$LOCK_DIR'"
   echo "SETTLED: Lock freigegeben."
   exit 0
