@@ -39,6 +39,9 @@ class SerialDispatcher:
         self._stop_signal = None
         self._last_ring_signal = None
         self._target = None
+        #: Ziel der laufenden Sitzung; ueberlebt den Wechsel zwischen zwei
+        #: Ring-Generationen und wird nur durch einen Stopp geloescht.
+        self._session_target: str | None = None
         self._unsettled = set()
 
     @property
@@ -51,8 +54,19 @@ class SerialDispatcher:
             await self._player.reconcile_volume(target)
 
     async def duck(self, seconds: float) -> PlaybackOutcome:
-        if self._target is None or not isinstance(self._player, MediaPlayerAdapter):
-            return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, self._target or "", "not_ringing")
+        """Pass a duck request to the adapter, also between two ring generations.
+
+        ``_target`` is cleared when a generation ends, so the session target is kept
+        separately: without it a wake word that lands in the pause was answered with
+        ``not_ringing`` although the alarm was still the session's own playback.
+        """
+        if isinstance(self._player, MediaPlayerAdapter):
+            session_target = self._target or self._session_target
+            if session_target is None:
+                return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, "", "not_ringing")
+            return await self._player.duck(seconds, session_target)
+        if self._target is None:
+            return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, "", "not_ringing")
         return await self._player.duck(seconds)
 
     def _track(self, task):
@@ -93,6 +107,7 @@ class SerialDispatcher:
             signal = self._stop_signal = asyncio.Event()
             self._last_ring_signal = signal
             self._target = target
+            self._session_target = target
             task = asyncio.create_task(self._player.play(target))
             waiter = asyncio.create_task(signal.wait())
             try:
@@ -138,6 +153,9 @@ class SerialDispatcher:
 
     async def stop(self):
         self._generation += 1
+        # Der Stopp beendet die Sitzung: ein Duck-Fenster darf danach nicht mehr
+        # auf die naechste Wiedergabe uebergreifen.
+        self._session_target = None
         signal, target = self._stop_signal, self._target
         if signal is None:
             return False

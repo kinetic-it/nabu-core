@@ -125,6 +125,9 @@ class PlaybackStatus(StrEnum):
     DUCK_CONFIRMED = "duck_confirmed"
     DUCK_UNCONFIRMED = "duck_unconfirmed"
     DUCK_FAILED = "duck_failed"
+    #: The session still owns the speaker, but no ring generation is running right
+    #: now. The window is remembered and applied to the next generation.
+    DUCK_DEFERRED = "duck_deferred"
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +181,7 @@ class MediaPlayerAdapter:
         max_seconds: float = 600.0,
         repeat: bool = False,
         volume: float | None = None,
+        duck_floor: float = 0.05,
         cycle_on: float = 0.0,
         cycle_off: float = 0.0,
         recovery_store=None,
@@ -212,12 +216,21 @@ class MediaPlayerAdapter:
         self._stop_requested = asyncio.Event()
         if volume is not None and not 0 <= volume <= 1:
             raise ValueError("volume must be between 0 and 1")
+        if not (math.isfinite(duck_floor) and 0 <= duck_floor < 1):
+            raise ValueError("duck_floor must be between 0 and 1")
+        if volume is not None and duck_floor >= volume:
+            raise ValueError("duck_floor must stay below the ring volume")
         if not all(math.isfinite(v) and v >= 0 for v in (cycle_on, cycle_off)):
             raise ValueError("ring cycle must be finite and non-negative")
         if cycle_off and (not cycle_on or volume is None):
             raise ValueError("silent ring cycle requires an on duration and ring volume")
         self._repeat = repeat
         self._volume = volume
+        self._duck_floor = duck_floor
+        # Ein Duck-Fenster, das zwischen zwei Ring-Generationen angefordert wurde.
+        # Es gilt nur fuer dasselbe Ziel, laeuft ab und wird beim Sitzungsende
+        # verworfen - niemals auf eine spaetere, fremde Wiedergabe uebertragen.
+        self._duck_intent: tuple[str, float] | None = None
         self._cycle_on = cycle_on
         self._cycle_off = cycle_off
         self._media_lock = asyncio.Lock()
@@ -524,6 +537,7 @@ class MediaPlayerAdapter:
             # in eine spaetere, fremde Wiedergabe hineinreichen.
             if ring.stopping:
                 self._release_ownership(ring.target)
+                self._drop_duck_intent(ring.target)
 
     async def _finish_locked(self, ring: _Ring) -> PlaybackOutcome:
         result = PlaybackOutcome(PlaybackStatus.STOP_UNCONFIRMED, ring.target, "no_playback")
@@ -637,24 +651,38 @@ class MediaPlayerAdapter:
             except Exception:  # noqa: BLE001 - unlesbarer Zustand ist kein Erfolg
                 state = ""
             if state in STOPPED_STATES:
+                self._drop_duck_intent(target)
                 return PlaybackOutcome(PlaybackStatus.STOPPED_CONFIRMED, target, "already_idle")
             if not self._session_owns(target):
                 return PlaybackOutcome(PlaybackStatus.STOP_UNCONFIRMED, target, "no_owned_playback")
             result = await self._stop_transport(target, wait=self._stop_timeout, interval=0.1)
             self._release_ownership(target)
+            self._drop_duck_intent(target)
             return result
         return await asyncio.shield(self._cleanup(ring))
 
-    async def duck(self, seconds: float) -> PlaybackOutcome:
+    async def duck(self, seconds: float, target: str | None = None) -> PlaybackOutcome:
+        """Lower the ringing level without ending the playback.
+
+        Zero is not a mute on every speaker: on the Echo 2 a volume of 0.0 stops
+        the stream, which turned a duck into a dead alarm. The configured floor is
+        therefore written instead of silence, and the ring volume is restored when
+        the window closes.
+
+        Between two ring generations this adapter holds no live ring although the
+        session still owns the speaker. Refusing there left NABU deaf for the whole
+        pause, so the window is remembered and applied to the next generation of the
+        same target. It never covers playback this session did not start itself.
+        """
         ring = self._ring
         if ring is None or not ring.started or ring.stopping:
-            return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, "", "not_ringing")
+            return self._defer_duck(seconds, target)
         target = ring.target
         if not math.isfinite(seconds) or not 0 < seconds <= 120:
             return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target, "invalid_seconds")
         async with self._media_lock:
             if ring.stopping or ring is not self._ring:
-                return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target, "not_ringing")
+                return self._defer_duck(seconds, target)
             try:
                 if await self._state(target) not in PLAYING_STATES | {"idle"}:
                     return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target, "not_available")
@@ -668,16 +696,64 @@ class MediaPlayerAdapter:
                 # Remember a mute attempt even if observation fails: no proof of
                 # ducking is not proof that the player stayed at the previous level.
                 ring.duck_active = True
-                confirmed = await self._set_volume(ring, 0.0)
+                confirmed = await self._set_volume(ring, self._duck_floor)
             except Exception as error:
                 _LOGGER.warning("Alarm duck failed for %s: %s", target, type(error).__name__)
                 return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target, type(error).__name__)
             if not confirmed or ring.stopping:
                 return PlaybackOutcome(
-                    PlaybackStatus.DUCK_UNCONFIRMED, target, "mute_not_confirmed"
+                    PlaybackStatus.DUCK_UNCONFIRMED, target, "duck_floor_not_confirmed"
                 )
             ring.duck_until = max(ring.duck_until, asyncio.get_running_loop().time() + seconds)
-            return PlaybackOutcome(PlaybackStatus.DUCK_CONFIRMED, target, "reported_volume_zero")
+            return PlaybackOutcome(
+                PlaybackStatus.DUCK_CONFIRMED, target, f"reported_volume_{self._duck_floor}"
+            )
+
+    def _defer_duck(self, seconds: float, target: str | None) -> PlaybackOutcome:
+        """Remember a duck window for the next ring generation of this session.
+
+        Only a speaker this adapter recently played on qualifies, so a stale intent
+        can never reach somebody else's audio. Expired intents are dropped instead of
+        being applied late.
+        """
+        if not math.isfinite(seconds) or not 0 < seconds <= 120:
+            return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target or "", "invalid_seconds")
+        candidate = target or self._single_owned_target()
+        if candidate is None:
+            return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target or "", "not_ringing")
+        try:
+            candidate = self._policy.check(candidate)
+        except Exception:  # noqa: BLE001 - denied targets are never ducked
+            return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, target or "", "not_ringing")
+        if not self._recent_effect(candidate):
+            return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, candidate, "not_ringing")
+        deadline = asyncio.get_running_loop().time() + seconds
+        self._duck_intent = (candidate, deadline)
+        _LOGGER.info("Alarm duck deferred to the next ring generation on %s", candidate)
+        return PlaybackOutcome(PlaybackStatus.DUCK_DEFERRED, candidate, "ring_generation_paused")
+
+    def _single_owned_target(self) -> str | None:
+        owned = [target for target in self._owned if self._recent_effect(target)]
+        return owned[0] if len(owned) == 1 else None
+
+    def _take_duck_intent(self, target: str) -> float:
+        """Consume a pending duck window; an expired or foreign one counts as none."""
+        intent = self._duck_intent
+        self._duck_intent = None
+        if intent is None:
+            return 0.0
+        owner, deadline = intent
+        if owner != target:
+            _LOGGER.info("Alarm duck window for %s ignored on %s", owner, target)
+            return 0.0
+        if deadline <= asyncio.get_running_loop().time():
+            _LOGGER.info("Alarm duck window for %s expired before the next generation", target)
+            return 0.0
+        return deadline
+
+    def _drop_duck_intent(self, target: str) -> None:
+        if self._duck_intent is not None and self._duck_intent[0] == target:
+            self._duck_intent = None
 
     async def _require_start(self, ring: _Ring) -> None:
         ring.play_attempted = True
@@ -755,6 +831,13 @@ class MediaPlayerAdapter:
             raise RuntimeError("previous alarm volume restore is pending")
         self.prepare_ring()
         ring = self._ring = _Ring(target)
+        # A duck requested between two generations applies to this one from its
+        # first frame: starting loud and lowering afterwards would defeat the point.
+        pending = self._take_duck_intent(target)
+        if pending and self._volume is not None and self._duck_floor < self._volume:
+            ring.duck_until = pending
+            ring.duck_active = True
+        start_level = self._duck_floor if ring.duck_active else self._volume
         try:
             async with self._media_lock:
                 allowed_states = (
@@ -764,7 +847,7 @@ class MediaPlayerAdapter:
                 )
                 if await self._state(target) not in allowed_states:
                     raise RuntimeError("alarm target is busy or unavailable")
-                if self._volume is not None and not await self._set_volume(ring, self._volume):
+                if start_level is not None and not await self._set_volume(ring, start_level):
                     raise RuntimeError("ring volume not confirmed")
                 if not ring.stopping:
                     await self._require_start(ring)

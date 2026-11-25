@@ -332,6 +332,10 @@ class AlarmServiceLayer:
         outcome = await self.scheduler.duck_alarm(seconds)
         if outcome.status is PlaybackStatus.DUCK_CONFIRMED:
             return ServiceResult(True, "DUCKED", {"seconds": seconds}, outcome.detail)
+        if outcome.status is PlaybackStatus.DUCK_DEFERRED:
+            # Angenommen, aber noch nicht hoerbar: das Fenster wird auf die naechste
+            # Ring-Generation angewendet. Das ist kein Nachweis einer Absenkung.
+            return ServiceResult(True, "DUCK_SCHEDULED", {"seconds": seconds}, outcome.detail)
         code = "NOT_RINGING" if outcome.detail == "not_ringing" else outcome.status.value.upper()
         return ServiceResult(False, code, None, outcome.detail)
 

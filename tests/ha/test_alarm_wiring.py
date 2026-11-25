@@ -204,7 +204,9 @@ async def test_bundle_duck_stop_and_journal_through_registered_ha_services(tmp_p
     ring = asyncio.create_task(invoke("ring", now=now.isoformat()))
     await asyncio.wait_for(starting.wait(), 1)
     assert (await invoke("duck", seconds=12))["code"] == "DUCKED"
-    assert media.attributes["volume_level"] == 0
+    # R32: der Duck senkt auf den Boden ab, nicht auf 0.0 - 0.0 beendet am Echo 2
+    # die Wiedergabe.
+    assert media.attributes["volume_level"] == pytest.approx(0.05)
     assert (await invoke("stop"))["data"]["confirmed"] is True
     await ring
     assert media.attributes["volume_level"] == 0.5

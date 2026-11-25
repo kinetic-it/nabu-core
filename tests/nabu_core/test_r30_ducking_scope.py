@@ -21,6 +21,9 @@ from nabu_core.player import MediaPlayerAdapter, PlaybackStatus
 TARGET = "media_player.alarm_test"
 OTHER = "media_player.other_echo"
 FOREIGN_MEDIA = "spotify:track:someoneelse"
+#: R32: Ducking senkt auf einen Boden ab statt auf 0.0 - 0.0 beendet am Echo 2 die
+#: Wiedergabe und machte aus dem Duckfenster eine Stille.
+DUCK_FLOOR = 0.05
 
 
 class Client:
@@ -126,7 +129,9 @@ async def test_two_ducks_in_a_row_restore_the_original_volume() -> None:
 
         first = await player.duck(0.05)
         assert first.status is PlaybackStatus.DUCK_CONFIRMED
-        assert client.volumes[TARGET] == 0.0, "the first duck did not mute"
+        assert client.volumes[TARGET] == pytest.approx(DUCK_FLOOR), (
+            "the first duck did not reach the floor"
+        )
 
         assert await wait_for_volume(client, 0.3, 2.0), (
             "the ring volume was not restored between the two interactions"
@@ -138,7 +143,9 @@ async def test_two_ducks_in_a_row_restore_the_original_volume() -> None:
 
         second = await player.duck(0.05)
         assert second.status is PlaybackStatus.DUCK_CONFIRMED
-        assert client.volumes[TARGET] == 0.0, "the second duck did not mute"
+        assert client.volumes[TARGET] == pytest.approx(DUCK_FLOOR), (
+            "the second duck did not reach the floor"
+        )
 
         assert await wait_for_volume(client, 0.3, 2.0), (
             "the ring volume was not restored after the second interaction"
@@ -214,7 +221,7 @@ async def test_a_stop_inside_the_duck_window_restores_the_volume() -> None:
     await asyncio.wait_for(client.playing.wait(), 1)
 
     assert (await player.duck(5.0)).status is PlaybackStatus.DUCK_CONFIRMED
-    assert client.volumes[TARGET] == 0
+    assert client.volumes[TARGET] == pytest.approx(DUCK_FLOOR)
 
     await player.stop(TARGET, wait=0.5)
     await ringing
@@ -329,7 +336,7 @@ async def test_our_own_media_is_stopped_and_restored() -> None:
 
         ducked = await player.duck(0.05)
         assert ducked.status is PlaybackStatus.DUCK_CONFIRMED
-        assert (TARGET, 0.0) in client.writes
+        assert (TARGET, DUCK_FLOOR) in client.writes
 
         stopped = await player.stop(TARGET, wait=0.5)
         assert stopped.status is PlaybackStatus.STOPPED_CONFIRMED

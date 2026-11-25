@@ -10,6 +10,9 @@ from nabu_core.player import MediaPlayerAdapter, PlaybackStatus, _Ring
 from nabu_core.scheduler import Scheduler
 
 TARGET = "media_player.alarm_test"
+#: R32: Ducking senkt nicht mehr auf 0.0 ab (das beendet am Echo 2 die Wiedergabe),
+#: sondern auf einen konfigurierbaren Boden.
+DUCK_FLOOR = 0.05
 
 
 class PlayerClient:
@@ -58,7 +61,8 @@ class PlayerClient:
     async def set_volume(self, target, volume):
         assert target == TARGET
         self.writes.append(volume)
-        if not (self.ignore_mute and volume == 0):
+        # Ein Geraet, das die Duck-Absenkung ignoriert (R32: der Boden statt 0.0).
+        if not (self.ignore_mute and volume <= DUCK_FLOOR):
             self.volume = volume
 
 
@@ -214,7 +218,7 @@ async def test_duck_restarts_repetition_and_restores_after_stop():
     try:
         await asyncio.wait_for(client.playing.wait(), 1)
         assert (await player.duck(0.05)).status is PlaybackStatus.DUCK_CONFIRMED
-        assert client.volume == 0
+        assert client.volume == pytest.approx(DUCK_FLOOR)
         client.playing.clear()
         await asyncio.wait_for(client.playing.wait(), 1)
         assert client.plays == 2
@@ -234,7 +238,7 @@ async def test_stop_racing_mute_never_restarts_the_ring():
             self.release = asyncio.Event()
 
         async def set_volume(self, target, volume):
-            if volume == 0:
+            if volume <= DUCK_FLOOR:
                 self.muting.set()
                 await self.release.wait()
             await super().set_volume(target, volume)

@@ -61,6 +61,7 @@ def describe_failure(error: BaseException, limit: int = 200) -> str:
 
 _LOGGER = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True, slots=True)
 class Occurrence:
     """A durable result for one alarm instance at one scheduled UTC instant."""
@@ -124,6 +125,9 @@ class Scheduler:
         self.recovery_check = recovery_check
         self._active_session: AlarmSession | None = None
         self._session_done: asyncio.Future[bool] | None = None
+        #: Laufende Stopp-Bestaetigungen; sie ueberleben einen abgebrochenen Turn und
+        #: werden hier gehalten, damit der Eventloop sie nicht einsammelt.
+        self._stop_tasks: set[asyncio.Task[bool]] = set()
         self.diagnostics: list[tuple[str, str]] = []
         self._owner_id = str(uuid4())
         self._lock_path = store.path.with_name(f"{store.path.name}.scheduler.lock")
@@ -207,9 +211,7 @@ class Scheduler:
             try:
                 current = self._current_epoch()
                 if current != epoch:
-                    _LOGGER.warning(
-                        "Nabu stop: session fenced by epoch %s -> %s", epoch, current
-                    )
+                    _LOGGER.warning("Nabu stop: session fenced by epoch %s -> %s", epoch, current)
                     await session.request_stop()
                     return
             except Exception:
@@ -726,30 +728,55 @@ class Scheduler:
                 await self.dispatcher.stop()
             finally:
                 raise
-        active = self._active_session
-        session_done = self._session_done
-        if active is not None and session_done is not None:
-            await active.request_stop()
-            try:
-                confirmed = await asyncio.wait_for(asyncio.shield(session_done), timeout=15.0)
-            except TimeoutError:
-                confirmed = False
-        else:
-            confirmed = (await self.dispatcher.stop()) is True
-        if confirmed and ids:
-            self._mark_stop_confirmed(ids)
+        # Der Nachweis laeuft als eigener Task: der Assist-Turn kann mitten in der
+        # Bestaetigung abgebrochen werden (R31 am Geraet belegt: enter-Log vorhanden,
+        # exit-Log fehlte). Fence und Markierung duerfen davon nicht abhaengen, und
+        # der exit-Eintrag muss in jedem Fall entstehen.
+        task = asyncio.create_task(self._stop_and_confirm(ids, started))
+        self._stop_tasks.add(task)
+        task.add_done_callback(self._stop_tasks.discard)
         try:
-            epoch_after = self._current_epoch()
-        except Exception:  # noqa: BLE001 - diagnostics only
-            epoch_after = -1
-        _LOGGER.warning(
-            "Nabu stop: exit confirmed=%s epoch=%s ids=%d elapsed=%.2fs",
-            confirmed,
-            epoch_after,
-            len(ids),
-            _time.monotonic() - started,
-        )
-        return confirmed
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            _LOGGER.warning(
+                "Nabu stop: turn cancelled after fence; confirmation continues in background"
+            )
+            raise
+
+    async def _stop_and_confirm(self, ids: tuple[str, ...], started: float) -> bool:
+        """Confirm one stop and log the outcome even if the caller is cancelled."""
+        confirmed = False
+        cancelled = False
+        try:
+            active = self._active_session
+            session_done = self._session_done
+            if active is not None and session_done is not None:
+                await active.request_stop()
+                try:
+                    confirmed = await asyncio.wait_for(asyncio.shield(session_done), timeout=15.0)
+                except TimeoutError:
+                    confirmed = False
+            else:
+                confirmed = (await self.dispatcher.stop()) is True
+            if confirmed and ids:
+                self._mark_stop_confirmed(ids)
+            return confirmed
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            try:
+                epoch_after = self._current_epoch()
+            except Exception:  # noqa: BLE001 - diagnostics only
+                epoch_after = -1
+            _LOGGER.warning(
+                "Nabu stop: exit confirmed=%s epoch=%s ids=%d elapsed=%.2fs cancelled=%s",
+                confirmed,
+                epoch_after,
+                len(ids),
+                _time.monotonic() - started,
+                cancelled,
+            )
 
     def _mark_stop_confirmed(self, ids: tuple[str, ...]) -> None:
         """Upgrade exactly the occurrences fenced by this stop call."""
