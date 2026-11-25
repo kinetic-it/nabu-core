@@ -75,10 +75,10 @@ SHA
 }
 
 run_case() {
-  local root="$1" installer="${2:-$INSTALLER}"
+  local root="$1" installer="${2:-$INSTALLER}" stage="${3:-$STAGE_SRC}"
   LAB_HA_STATE="$root/ha-state" PATH="$root/bin:$PATH" \
     HA_LAB_ROOT="$root" HA_TARGET=root@localhost HA_SSH_KEY=/dev/null \
-    bash "$installer" "$STAGE_SRC" > "$root/install.log" 2>&1
+    bash "$installer" "$stage" > "$root/install.log" 2>&1
   echo "$?"
 }
 
@@ -148,6 +148,40 @@ check "Installer nutzt kein --quiet" bash -c "! grep -q 'sha256sum -c --quiet' '
 rc=$(run_case "$ROOT")
 expect "Exitcode trotz BusyBox-Shim (10)" "$rc" "10"
 check "BusyBox-Shim aktiv" test -x "$ROOT/bin/sha256sum"
+
+echo "== Fall E: Paket mit fuenf Dateien =="
+ROOT="$LAB_BASE/e"; prepare_root "$ROOT"
+STAGE5="$LAB_BASE/stage5"
+rm -rf "$STAGE5"; mkdir -p "$STAGE5/nabu_core"
+cp "$STAGE_SRC"/nabu_core/*.py "$STAGE5/nabu_core/"
+printf 'extra module\n' > "$STAGE5/nabu_core/alarm_session.py"
+( cd "$STAGE5" && sha256sum nabu_core/*.py > SHA256SUMS )
+rc=$(run_case "$ROOT" "$INSTALLER" "$STAGE5")
+expect "Exitcode (10)" "$rc" "10"
+check "fuenf Dateien getauscht" cmp -s "$ROOT/$CURRENT_REL/nabu_core/alarm_session.py" "$STAGE5/nabu_core/alarm_session.py"
+check "Dateizahl weiterhin 42" test "$(find "$ROOT/$CURRENT_REL" -type f | wc -l)" -eq 42
+
+echo "== Fall F: unerlaubter Manifestpfad =="
+ROOT="$LAB_BASE/f"; prepare_root "$ROOT"
+STAGEBAD="$LAB_BASE/stagebad"
+rm -rf "$STAGEBAD"; mkdir -p "$STAGEBAD"
+printf 'x\n' > "$STAGEBAD/passwd"
+( cd "$STAGEBAD" && sha256sum passwd > SHA256SUMS )
+rc=$(run_case "$ROOT" "$INSTALLER" "$STAGEBAD")
+expect "Exitcode (1 = abgelehnt)" "$rc" "1"
+check "Meldung nennt den Pfad" grep -q "unerlaubter Manifestpfad" "$ROOT/install.log"
+check "nichts getauscht" bash -c "grep -qx 'original player' '$ROOT/$CURRENT_REL/nabu_core/player.py'"
+
+echo "== Fall G: fremde Datei im Paket =="
+ROOT="$LAB_BASE/g"; prepare_root "$ROOT"
+STAGEEXTRA="$LAB_BASE/stageextra"
+rm -rf "$STAGEEXTRA"; mkdir -p "$STAGEEXTRA/nabu_core"
+cp "$STAGE_SRC"/nabu_core/*.py "$STAGEEXTRA/nabu_core/"
+printf 'stray\n' > "$STAGEEXTRA/notiz.txt"
+( cd "$STAGEEXTRA" && sha256sum nabu_core/*.py > SHA256SUMS )
+rc=$(run_case "$ROOT" "$INSTALLER" "$STAGEEXTRA")
+expect "Exitcode (1 = abgelehnt)" "$rc" "1"
+check "Meldung nennt fremde Dateien" grep -q "Stage enthaelt fremde Dateien" "$ROOT/install.log"
 
 echo
 echo "ERGEBNIS: $PASS bestanden, $FAIL fehlgeschlagen"

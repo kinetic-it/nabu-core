@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Nabu Core - Stufe-A-Installation (R32): genau vier Dateien im Paket nabu_core.
+# Nabu Core - Stufen-Installation (R32): tauscht genau die Dateien, die im
+# Paket-SHA256SUMS stehen (ausschliesslich nabu_core/*.py).
 #
 # Gelernt aus R19 (install_d2.sh) und uebernommen:
 #   * Ein Vollbackup liegt AUSSERHALB von custom_components. Ein Unterordner mit
@@ -20,9 +21,8 @@
 # Umgebung: HA_TARGET=root@host  HA_SSH_KEY=/pfad/zum/key
 #
 # Der Stage enthaelt:
-#   SHA256SUMS               (Pflicht)
-#   nabu_core/player.py      nabu_core/dispatch.py
-#   nabu_core/scheduler.py   nabu_core/ha_services.py
+#   SHA256SUMS               (Pflicht, bestimmt die Dateiliste)
+#   nabu_core/<modul>.py     je Eintrag genau eine Datei
 #
 # Nicht enthalten und ausdruecklich unberuehrt: manifest.json, const.py,
 # Optionen (alarm_media, cycle_on/off), /media-Dateien, Datenbank.
@@ -38,7 +38,9 @@ SSH_TIMEOUT="${HA_SSH_TIMEOUT:-90}"
 [[ "$SSH_TIMEOUT" =~ ^[1-9][0-9]{0,2}$ ]] && (( SSH_TIMEOUT <= 180 )) || { echo "FEHLER: ungueltiger SSH-Timeout" >&2; exit 1; }
 SSH=(timeout --signal=TERM --kill-after=5 "${SSH_TIMEOUT}s" ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -i "$HA_SSH_KEY" "$HA_TARGET")
 
-FILES=(player.py dispatch.py scheduler.py ha_services.py)
+# Welche Dateien getauscht werden, steht im Paket selbst (SHA256SUMS), nicht im
+# Skript: sonst muesste das Werkzeug fuer jede Kandidatengroesse angefasst werden.
+FILES=()
 CURRENT=/config/custom_components/kinetic_voice_router
 BACKUP_ROOT=/config/backups/nabu-stage-a
 LOCK_DIR=/config/backups/nabu-stage-a.lock
@@ -76,12 +78,29 @@ fi
 STAGE="${1:?stage directory required}"
 test -d "$STAGE" || { echo "FEHLER: Stage fehlt" >&2; exit 1; }
 test -f "$STAGE/SHA256SUMS" || { echo "FEHLER: SHA256SUMS fehlt" >&2; exit 1; }
+mapfile -t stage_entries < <(awk 'NF >= 2 {print $NF}' "$STAGE/SHA256SUMS")
+(( ${#stage_entries[@]} >= 1 )) || { echo "FEHLER: SHA256SUMS ist leer" >&2; exit 1; }
+for entry in "${stage_entries[@]}"; do
+  [[ "$entry" =~ ^nabu_core/[a-z0-9_]+\.py$ ]] || {
+    echo "FEHLER: unerlaubter Manifestpfad: $entry" >&2
+    exit 1
+  }
+  FILES+=("${entry#nabu_core/}")
+done
+(( ${#FILES[@]} == $(printf '%s\n' "${FILES[@]}" | sort -u | wc -l) )) || {
+  echo "FEHLER: doppelter Eintrag in SHA256SUMS" >&2
+  exit 1
+}
 for f in "${FILES[@]}"; do
   test -s "$STAGE/nabu_core/$f" || { echo "FEHLER: Stage unvollstaendig: $f" >&2; exit 1; }
 done
 ( cd "$STAGE" && sha256sum -c SHA256SUMS >/dev/null ) || { echo "FEHLER: Stage-Hashes stimmen nicht" >&2; exit 1; }
-(( $(find "$STAGE" -type f | wc -l) == 5 )) || { echo "FEHLER: Stage enthaelt fremde Dateien" >&2; exit 1; }
+(( $(find "$STAGE" -type f | wc -l) == ${#FILES[@]} + 1 )) || {
+  echo "FEHLER: Stage enthaelt fremde Dateien" >&2
+  exit 1
+}
 
+FILE_LIST="${FILES[*]}"
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 echo "RUN_ID=$RUN_ID"
 
@@ -93,6 +112,10 @@ live_preflight() {
   test \"\$count\" -eq 42
   test -s '$CURRENT/manifest.json'
   test -s '$CURRENT/const.py'
+  # Nur vorhandene Dateien tauschen: ein Paket darf die Integration nicht erweitern.
+  for f in $FILE_LIST; do
+    test -s '$CURRENT/nabu_core/'\$f
+  done
   # Keine fremde Kopie derselben Domain (R19-Befund).
   found=0
   for m in /config/custom_components/*/manifest.json; do
@@ -173,19 +196,19 @@ for _ in 1 2 3 4 5 6 7 8; do
 done
 "${SSH[@]}" "$LOCK_GUARD; $STOP_GUARD" || { echo "FEHLER: Core-Stopp nicht bestaetigt; kein Dateitausch" >&2; exit 1; }
 
-echo "== Dateien tauschen (nur vier) =="
-# Erst alle vier als .r32.new ablegen und einzeln pruefen, dann in einem Zug
+echo "== Dateien tauschen (${#FILES[@]} Dateien) =="
+# Erst alle als .r32.new ablegen und einzeln pruefen, dann in einem Zug
 # umbenennen: ein Fehler beim Kopieren hinterlaesst so keinen halben Tausch (R19).
 "${SSH[@]}" "$LOCK_GUARD; set -eu
   $STOP_GUARD
   stage='$BACKUP_ROOT/$RUN_ID/stage/nabu_core'
   live='$CURRENT/nabu_core'
-  for f in player.py dispatch.py scheduler.py ha_services.py; do
+  for f in $FILE_LIST; do
     test -s \"\$stage/\$f\"
     cp -p \"\$stage/\$f\" \"\$live/\$f.r32.new\"
     test \"\$(sha256sum \"\$live/\$f.r32.new\" | cut -d' ' -f1)\" = \"\$(sha256sum \"\$stage/\$f\" | cut -d' ' -f1)\"
   done
-  for f in player.py dispatch.py scheduler.py ha_services.py; do
+  for f in $FILE_LIST; do
     mv \"\$live/\$f.r32.new\" \"\$live/\$f\"
   done"
 swapped=1
@@ -193,7 +216,7 @@ swapped=1
 "${SSH[@]}" "$LOCK_GUARD; set -eu
   stage='$BACKUP_ROOT/$RUN_ID/stage/nabu_core'
   live='$CURRENT/nabu_core'
-  for f in player.py dispatch.py scheduler.py ha_services.py; do
+  for f in $FILE_LIST; do
     expected=\$(sha256sum \"\$stage/\$f\" | cut -d' ' -f1)
     actual=\$(sha256sum \"\$live/\$f\" | cut -d' ' -f1)
     test \"\$expected\" = \"\$actual\"
