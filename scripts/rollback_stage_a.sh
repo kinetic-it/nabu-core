@@ -52,7 +52,7 @@ test -s "$BACKUP/SHA256SUMS"
 cd "$BACKUP"
 bad=$(find . ! -type d ! -type f -print -quit)
 test -z "$bad"
-sha256sum -c --quiet SHA256SUMS
+sha256sum -c SHA256SUMS >/dev/null
 test -d "$BACKUP/integration/nabu_core"
 check_domains
 test ! -e "$RDIR"

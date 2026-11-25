@@ -161,7 +161,7 @@ tar -C "$STAGE" -c . | "${SSH[@]}" "$LOCK_GUARD; set -eu
   mkdir '$BACKUP_ROOT/$RUN_ID/stage'
   tar -x -C '$BACKUP_ROOT/$RUN_ID/stage'
   cd '$BACKUP_ROOT/$RUN_ID/stage'
-  sha256sum -c --quiet SHA256SUMS"
+  sha256sum -c SHA256SUMS >/dev/null"
 
 echo "== HA stoppen =="
 stop_attempted=1
@@ -174,28 +174,37 @@ done
 "${SSH[@]}" "$LOCK_GUARD; $STOP_GUARD" || { echo "FEHLER: Core-Stopp nicht bestaetigt; kein Dateitausch" >&2; exit 1; }
 
 echo "== Dateien tauschen (nur vier) =="
+# Erst alle vier als .r32.new ablegen und einzeln pruefen, dann in einem Zug
+# umbenennen: ein Fehler beim Kopieren hinterlaesst so keinen halben Tausch (R19).
 "${SSH[@]}" "$LOCK_GUARD; set -eu
   $STOP_GUARD
   stage='$BACKUP_ROOT/$RUN_ID/stage/nabu_core'
   live='$CURRENT/nabu_core'
   for f in player.py dispatch.py scheduler.py ha_services.py; do
     test -s \"\$stage/\$f\"
-    cp -p \"\$stage/\$f\" \"\$live/\$f.r32.tmp\"
-    mv \"\$live/\$f.r32.tmp\" \"\$live/\$f\"
+    cp -p \"\$stage/\$f\" \"\$live/\$f.r32.new\"
+    test \"\$(sha256sum \"\$live/\$f.r32.new\" | cut -d' ' -f1)\" = \"\$(sha256sum \"\$stage/\$f\" | cut -d' ' -f1)\"
   done
-  cd '$BACKUP_ROOT/$RUN_ID/stage'
   for f in player.py dispatch.py scheduler.py ha_services.py; do
-    expected=\$(sha256sum \"\$stage/nabu_core/\$f\" | cut -d' ' -f1)
+    mv \"\$live/\$f.r32.new\" \"\$live/\$f\"
+  done"
+swapped=1
+
+"${SSH[@]}" "$LOCK_GUARD; set -eu
+  stage='$BACKUP_ROOT/$RUN_ID/stage/nabu_core'
+  live='$CURRENT/nabu_core'
+  for f in player.py dispatch.py scheduler.py ha_services.py; do
+    expected=\$(sha256sum \"\$stage/\$f\" | cut -d' ' -f1)
     actual=\$(sha256sum \"\$live/\$f\" | cut -d' ' -f1)
     test \"\$expected\" = \"\$actual\"
   done
   count=\$(find '$CURRENT' -type f -not -path '*__pycache__*' | wc -l)
   test \"\$count\" -eq 42
+  test \"\$(find '$CURRENT' -name '*.tmp' -o -name '*.r32.new' | wc -l)\" -eq 0
   # Unberuehrt: Manifest, const.py und die Optionen.
   diff -q '$CURRENT/manifest.json' '$BACKUP_ROOT/$RUN_ID/integration/manifest.json'
   diff -q '$CURRENT/const.py' '$BACKUP_ROOT/$RUN_ID/integration/const.py'
   diff -q /config/.storage/core.config_entries '$BACKUP_ROOT/$RUN_ID/core.config_entries'"
-swapped=1
 
 echo "== HA starten =="
 start_attempted=1
