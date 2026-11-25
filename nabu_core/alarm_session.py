@@ -73,11 +73,13 @@ class AlarmSession:
     max_restarts: int = 2
     ring_seconds: float = 600.0
     restart_delay: float = 0.0
+    interaction_grace: float = 10.0
     _stop_requested: asyncio.Event = field(default_factory=asyncio.Event)
     _wake: asyncio.Event = field(default_factory=asyncio.Event)
     _claim: _MusicClaim | None = None
     _warnings: list[str] = field(default_factory=list)
     _last_retry_detail: str | None = None
+    _interaction_since: float | None = None
 
     def __post_init__(self) -> None:
         if not self.poll > 0:
@@ -88,6 +90,8 @@ class AlarmSession:
             raise ValueError("ring_seconds must be between 0 and 3600")
         if not 0 <= self.restart_delay <= 10:
             raise ValueError("restart_delay must be between 0 and 10 seconds")
+        if not 0 < self.interaction_grace <= 120:
+            raise ValueError("interaction_grace must be between 0 and 120 seconds")
 
     async def request_stop(self) -> bool:
         """Ask the session to end now.
@@ -124,15 +128,32 @@ class AlarmSession:
                 if self.interaction_active is not None:
                     active = await self._interaction()
                     if active is True:
-                        if asyncio.get_running_loop().time() >= deadline:
+                        now = asyncio.get_running_loop().time()
+                        if now >= deadline:
                             return await self._finish(
                                 SessionOutcome.RANG_OUT, "ring_seconds_elapsed", restarts
                             )
-                        try:
-                            await asyncio.wait_for(self._wake.wait(), self.poll)
-                        except TimeoutError:
-                            pass
-                        continue
+                        if self._interaction_since is None:
+                            self._interaction_since = now
+                        if now - self._interaction_since >= self.interaction_grace:
+                            # A turn that never leaves the pipeline is no turn: a hung
+                            # satellite state must not silence the alarm for the rest of
+                            # the window (observed on hardware: `listening` for 35 s).
+                            _LOGGER.warning(
+                                "Alarm: voice turn active for %.0fs without ending; "
+                                "ringing on instead of staying silent",
+                                now - self._interaction_since,
+                            )
+                            self._note("interaction_hang")
+                            self._interaction_since = None
+                        else:
+                            try:
+                                await asyncio.wait_for(self._wake.wait(), self.poll)
+                            except TimeoutError:
+                                pass
+                            continue
+                    else:
+                        self._interaction_since = None
                 ring_task = asyncio.create_task(self._ring_once())
                 reason = await self._supervise(ring_task, deadline)
                 if reason is not None:
