@@ -197,6 +197,7 @@ rc=$(run_case "$ROOT")
 expect "Installation (10)" "$rc" "10"
 runid=$(grep -o '[0-9]\{8\}-[0-9]\{6\}-[0-9]*' "$ROOT/install.log" | head -1)
 check "Lock haelt nach Installation" test -d "$ROOT/config/backups/nabu-stage-a.lock"
+printf '%s' "$runid" > "$ROOT/config/backups/nabu-stage-a.lock/settled"  # Altlast aus dem ersten Settle-Versuch
 rc=$(run_settle "$ROOT" "20200101-000000-1")
 check "falscher Token wird abgelehnt" test "$rc" != "0"
 check "Lock bleibt bei falschem Token" test -d "$ROOT/config/backups/nabu-stage-a.lock"
