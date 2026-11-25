@@ -158,6 +158,31 @@ async def test_manual_volume_change_during_the_ring_wins_over_the_duck():
     await drain(task)
 
 
-def test_duck_floor_must_stay_below_the_ring_volume():
+def test_a_duck_floor_of_zero_is_rejected():
+    """0.0 ist kein Mute, sondern ein Player-Stopp: der Wert darf nicht durchrutschen."""
+
     with pytest.raises(ValueError):
-        build(EchoClient(), duck_floor=0.3)
+        build(EchoClient(), duck_floor=0.0)
+    with pytest.raises(ValueError):
+        build(EchoClient(), duck_floor=-0.1)
+
+
+async def test_a_low_ring_volume_gets_a_proportional_floor():
+    """Kleine Ringlautstaerken bleiben nutzbar: der Floor wird gedeckelt, nicht abgelehnt."""
+
+    # Ringpegel 0.04 liegt unter dem Standard-Floor 0.05: ohne Deckelung waere das
+    # Ducking wirkungslos oder lauter als der Wecker.
+    client = EchoClient(volume=0.04)
+    player = build(client, volume=0.04, duck_floor=0.05)
+    task = asyncio.create_task(player.play(TARGET))
+    assert await wait_until(lambda: client.state == "playing")
+
+    outcome = await player.duck(0.4)
+
+    assert outcome.status is PlaybackStatus.DUCK_CONFIRMED
+    assert client.volumes[TARGET] == pytest.approx(0.02), "halber Ringpegel als Boden"
+    assert client.state == "playing"
+    assert await wait_until(lambda: client.volumes[TARGET] == pytest.approx(0.04), 1.5)
+
+    await player.stop_ring(TARGET)
+    await drain(task)

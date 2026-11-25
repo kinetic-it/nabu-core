@@ -216,10 +216,20 @@ class MediaPlayerAdapter:
         self._stop_requested = asyncio.Event()
         if volume is not None and not 0 <= volume <= 1:
             raise ValueError("volume must be between 0 and 1")
-        if not (math.isfinite(duck_floor) and 0 <= duck_floor < 1):
-            raise ValueError("duck_floor must be between 0 and 1")
+        if not (math.isfinite(duck_floor) and 0 < duck_floor < 1):
+            # 0.0 ist auf dem Echo 2 kein Mute, sondern ein Player-Stopp - genau der
+            # R31-Fehler. Ein Floor von 0 wird deshalb abgelehnt statt still zu stoeren.
+            raise ValueError("duck_floor must be greater than 0 and below 1")
         if volume is not None and duck_floor >= volume:
-            raise ValueError("duck_floor must stay below the ring volume")
+            # Ein Floor auf oder ueber dem Ringpegel macht das Ducking wirkungslos
+            # oder stellt den Wecker lauter. Statt die Einrichtung scheitern zu
+            # lassen (kleine Ringlautstaerken sind zulaessig), wird gedeckelt.
+            duck_floor = volume / 2
+            _LOGGER.warning(
+                "Alarm duck floor capped to %.3f: it must stay below the ring volume %.3f",
+                duck_floor,
+                volume,
+            )
         if not all(math.isfinite(v) and v >= 0 for v in (cycle_on, cycle_off)):
             raise ValueError("ring cycle must be finite and non-negative")
         if cycle_off and (not cycle_on or volume is None):
@@ -753,6 +763,16 @@ class MediaPlayerAdapter:
 
     def _drop_duck_intent(self, target: str) -> None:
         if self._duck_intent is not None and self._duck_intent[0] == target:
+            self._duck_intent = None
+
+    def cancel_pending_duck(self, target: str | None = None) -> None:
+        """Verwirft ein vorgemerktes Duck-Fenster (Sitzungsende, Stopp).
+
+        Ein Fenster, das eine beendete Sitzung ueberlebt, wuerde den naechsten
+        Wecker am selben Ziel geduckt starten - genau die Uebertragung, die
+        ausgeschlossen sein muss.
+        """
+        if target is None or self._duck_intent is None or self._duck_intent[0] == target:
             self._duck_intent = None
 
     async def _require_start(self, ring: _Ring) -> None:

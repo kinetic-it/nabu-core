@@ -840,6 +840,9 @@ class Scheduler:
                 try:
                     if self.session_factory is None:
                         result: DispatchResult = await self.dispatcher.ring(self.target)
+                        closer = getattr(self.dispatcher, "session_ended", None)
+                        if closer is not None:
+                            closer()
                     else:
                         self._active_session = self.session_factory(self.target)
                         occurrence_id = occurrence.occurrence_id
@@ -882,6 +885,13 @@ class Scheduler:
                                 session_done.set_result(session_confirmed)
                             self._session_done = None
                             self._active_session = None
+                            # Sitzungsende (Auslaufen, Fehler, Stopp) muss das
+                            # Sitzungsziel im Dispatcher und ein vorgemerktes
+                            # Duck-Fenster loeschen - sonst startet der naechste
+                            # Wecker am selben Ziel geduckt.
+                            closer = getattr(self.dispatcher, "session_ended", None)
+                            if closer is not None:
+                                closer()
                         status = (
                             "completed" if report.outcome is SessionOutcome.RANG_OUT else "failed"
                         )

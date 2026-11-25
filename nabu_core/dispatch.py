@@ -69,6 +69,20 @@ class SerialDispatcher:
             return PlaybackOutcome(PlaybackStatus.DUCK_FAILED, "", "not_ringing")
         return await self._player.duck(seconds)
 
+    def session_ended(self) -> None:
+        """Die Klingelsitzung ist vorbei - auch ohne Stopp (Auslaufen, Fehler).
+
+        Ohne diesen Aufruf bliebe das Sitzungsziel stehen und ein Duck-Fenster
+        koennte einen spaeteren Wecker am selben Ziel geduckt starten.
+        """
+        self._end_session()
+
+    def _end_session(self) -> None:
+        target = self._session_target
+        self._session_target = None
+        if target is not None and isinstance(self._player, MediaPlayerAdapter):
+            self._player.cancel_pending_duck(target)
+
     def _track(self, task):
         self._unsettled.add(task)
         task.add_done_callback(self._unsettled.discard)
@@ -155,7 +169,7 @@ class SerialDispatcher:
         self._generation += 1
         # Der Stopp beendet die Sitzung: ein Duck-Fenster darf danach nicht mehr
         # auf die naechste Wiedergabe uebergreifen.
-        self._session_target = None
+        self._end_session()
         signal, target = self._stop_signal, self._target
         if signal is None:
             return False
