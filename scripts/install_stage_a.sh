@@ -79,7 +79,7 @@ test -f "$STAGE/SHA256SUMS" || { echo "FEHLER: SHA256SUMS fehlt" >&2; exit 1; }
 for f in "${FILES[@]}"; do
   test -s "$STAGE/nabu_core/$f" || { echo "FEHLER: Stage unvollstaendig: $f" >&2; exit 1; }
 done
-( cd "$STAGE" && sha256sum -c --quiet SHA256SUMS ) || { echo "FEHLER: Stage-Hashes stimmen nicht" >&2; exit 1; }
+( cd "$STAGE" && sha256sum -c SHA256SUMS >/dev/null ) || { echo "FEHLER: Stage-Hashes stimmen nicht" >&2; exit 1; }
 (( $(find "$STAGE" -type f | wc -l) == 5 )) || { echo "FEHLER: Stage enthaelt fremde Dateien" >&2; exit 1; }
 
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
@@ -104,7 +104,7 @@ live_preflight() {
   done
   test \"\$found\" -eq 1"
 }
-live_preflight
+live_preflight || { echo "FEHLER: Live-Preflight fehlgeschlagen (Dateizahl 42, manifest.json/const.py oder Domain-Eindeutigkeit)" >&2; exit 1; }
 if [ "${2:-}" = "--preflight-only" ]; then
   echo "PREFLIGHT_ONLY_OK: keine Aenderung vorgenommen."
   exit 0
