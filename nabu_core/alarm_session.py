@@ -80,6 +80,7 @@ class AlarmSession:
     _warnings: list[str] = field(default_factory=list)
     _last_retry_detail: str | None = None
     _interaction_since: float | None = None
+    _interaction_hung: bool = False
 
     def __post_init__(self) -> None:
         if not self.poll > 0:
@@ -135,17 +136,23 @@ class AlarmSession:
                             )
                         if self._interaction_since is None:
                             self._interaction_since = now
-                        if now - self._interaction_since >= self.interaction_grace:
-                            # A turn that never leaves the pipeline is no turn: a hung
-                            # satellite state must not silence the alarm for the rest of
-                            # the window (observed on hardware: `listening` for 35 s).
-                            _LOGGER.warning(
-                                "Alarm: voice turn active for %.0fs without ending; "
-                                "ringing on instead of staying silent",
-                                now - self._interaction_since,
-                            )
-                            self._note("interaction_hang")
-                            self._interaction_since = None
+                        hung = self._interaction_hung or (
+                            now - self._interaction_since >= self.interaction_grace
+                        )
+                        if hung:
+                            if not self._interaction_hung:
+                                # A turn that never leaves the pipeline is no turn: a hung
+                                # satellite state must not silence the alarm (observed on
+                                # hardware: `listening` for 35 s). Exactly one grace window
+                                # per turn - afterwards the alarm keeps ringing instead of
+                                # buying the same hung turn a new silence every interval.
+                                _LOGGER.warning(
+                                    "Alarm: voice turn active for %.1fs without ending; "
+                                    "ringing on instead of staying silent",
+                                    now - self._interaction_since,
+                                )
+                                self._note("interaction_hang")
+                                self._interaction_hung = True
                         else:
                             try:
                                 await asyncio.wait_for(self._wake.wait(), self.poll)
@@ -154,6 +161,7 @@ class AlarmSession:
                             continue
                     else:
                         self._interaction_since = None
+                        self._interaction_hung = False
                 ring_task = asyncio.create_task(self._ring_once())
                 reason = await self._supervise(ring_task, deadline)
                 if reason is not None:
@@ -256,9 +264,10 @@ class AlarmSession:
 
     async def _await_interaction_end(self, deadline: float) -> None:
         """Wait (bounded) until the voice turn is over so a restart cannot cancel it."""
-        if self.interaction_active is None:
+        if self.interaction_active is None or self._interaction_hung:
             return
-        limit = min(deadline, asyncio.get_running_loop().time() + 10.0)
+        started = asyncio.get_running_loop().time()
+        limit = min(deadline, started + self.interaction_grace)
         while asyncio.get_running_loop().time() < limit:
             if self._stop_requested.is_set() or not await self._interaction():
                 return
@@ -266,6 +275,17 @@ class AlarmSession:
                 await asyncio.wait_for(self._wake.wait(), self.poll)
             except TimeoutError:
                 pass
+        if await self._interaction() is not True:
+            return
+        # The turn outlived its grace window here as well. Latch it so the same hung
+        # turn cannot buy another silence window later in this session.
+        _LOGGER.warning(
+            "Alarm: voice turn still active after %.1fs; ringing on",
+            self.interaction_grace,
+        )
+        self._note("interaction_hang")
+        self._interaction_hung = True
+        self._interaction_since = started
 
     async def _restart_pause(self, deadline: float) -> None:
         remaining = deadline - asyncio.get_running_loop().time()
