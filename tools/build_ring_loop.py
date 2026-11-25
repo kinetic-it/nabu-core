@@ -13,6 +13,7 @@ Usage::
 
     python3 tools/build_ring_loop.py alarm_2s.wav alarm_loop7s.wav
     python3 tools/build_ring_loop.py in.wav out.wav --tone 4 --silence 3
+    python3 tools/build_ring_loop.py in.wav out.wav --tone 4 --silence 3 --duration 60
 """
 
 from __future__ import annotations
@@ -23,7 +24,13 @@ import wave
 from pathlib import Path
 
 
-def build(source: Path, target: Path, tone_seconds: float, silence_seconds: float) -> str:
+def build(
+    source: Path,
+    target: Path,
+    tone_seconds: float,
+    silence_seconds: float,
+    duration: float | None = None,
+) -> str:
     with wave.open(str(source), "rb") as handle:
         params = handle.getparams()
         if params.comptype != "NONE":
@@ -37,9 +44,19 @@ def build(source: Path, target: Path, tone_seconds: float, silence_seconds: floa
     repeats = max(1, round(tone_seconds * params.framerate / tone_frames))
     silence = b"\x00" * (int(silence_seconds * params.framerate) * frame_width)
 
+    block = tone * repeats + silence
+    block_frames = len(block) // frame_width
+    frames_wanted = None
+    if duration is not None:
+        if duration <= 0:
+            raise SystemExit("--duration must be positive")
+        frames_wanted = int(duration * params.framerate)
+        blocks = -(-frames_wanted // block_frames)  # aufrunden
+        block = block * blocks
+
     with wave.open(str(target), "wb") as out:
         out.setparams(params)
-        out.writeframes(tone * repeats + silence)
+        out.writeframes(block if frames_wanted is None else block[: frames_wanted * frame_width])
 
     with wave.open(str(target), "rb") as check:
         duration = check.getnframes() / check.getframerate()
@@ -60,10 +77,16 @@ def main() -> None:
         "--tone", type=float, default=4.0, help="Sekunden Ton (Vielfache der Quelle)"
     )
     parser.add_argument("--silence", type=float, default=3.0, help="Sekunden Stille am Ende")
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        help="Gesamtdauer in Sekunden; der Block wiederholt sich bis dahin",
+    )
     args = parser.parse_args()
     if args.tone <= 0 or args.silence < 0:
         raise SystemExit("--tone must be positive and --silence must not be negative")
-    build(args.source, args.target, args.tone, args.silence)
+    build(args.source, args.target, args.tone, args.silence, args.duration)
 
 
 if __name__ == "__main__":
